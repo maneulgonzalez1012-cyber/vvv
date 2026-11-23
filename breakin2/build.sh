@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build.sh — bundle, gate, obfuscate, verify.
+# build.sh — bundle, gate, obfuscate each part, assemble, verify.
 #
 # The dist/ artifacts are committed, so this only needs to run when the source
 # changes. It wants a toolchain that is not vendored here:
@@ -27,11 +27,11 @@ step() { printf '\n== %s\n' "$*"; }
 step "bundle"
 python3 build/pack.py
 
-step "analyze (nonstrict, our own code only)"
-"$LUAU" build/out/gate.luau >/dev/null
-"$LUAU" build/out/gate.luau | tail -3
+step "gate: load every module, fire every menu callback, item flows"
+"$LUAU" build/out/gate.luau
+
+step "lint"
 mkdir -p build/out
-# lint: unknown globals are expected (Roblox API), everything else is not
 if command -v luau-analyze >/dev/null 2>&1; then ANALYZE=luau-analyze
 else ANALYZE="$(dirname "$LUAU")/luau-analyze"; fi
 "$ANALYZE" --mode=nonstrict dist/breakin2.lua 2>&1 \
@@ -40,18 +40,27 @@ if [ -s build/out/lint.txt ]; then
     echo "lint findings:"; cat build/out/lint.txt
 fi
 
-step "obfuscate (Prometheus, Medium variant)"
-"$LUA" "$PROMETHEUS" --config build/prometheus.medium.lua --LuaU --nocolors \
-    --out dist/breakin2.obf.lua dist/breakin2.lua
+step "obfuscate each part (Prometheus, Medium variant)"
+mkdir -p build/out/obf
+rm -f build/out/obf/*.lua
+for part in build/out/parts/p*.lua; do
+    name="$(basename "$part")"
+    "$LUA" "$PROMETHEUS" --config build/prometheus.medium.lua --LuaU --nocolors \
+        --out "build/out/obf/$name" "$part" >/dev/null
+    printf '  %s  %8d -> %8d bytes\n' "$name" "$(wc -c < "$part")" "$(wc -c < "build/out/obf/$name")"
+done
 
-step "verify: obfuscated output runs"
+step "assemble"
+python3 build/assemble.py
+
+step "verify: the assembled file runs under LuaJIT and Luau"
 python3 build/verify.py
 "$LUAJIT" build/out/verify_luajit.lua
 "$LUAU" build/out/verify_luau.luau
 
 step "summary"
 python3 - <<'PY'
-import hashlib, os
+import hashlib
 for name in ("dist/breakin2.lua", "dist/breakin2.obf.lua"):
     data = open(name, "rb").read()
     print("%-24s %8d bytes  sha256=%s" % (

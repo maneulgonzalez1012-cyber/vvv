@@ -13,9 +13,11 @@ local U = require("core/util")
 
 local Npc = {}
 
+-- Obtain, then equip. Items.obtain already waits for the tool to appear, which
+-- is what the old version got wrong: it reparented before the tool existed.
 local function equip(name)
-    if not Items.give(name) then return false end
-    task.wait(0.2)
+    if not Items.obtain(name, 1.0) then return false end
+    task.wait(0.15)
     return Items.equip(name)
 end
 

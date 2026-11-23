@@ -1,5 +1,6 @@
--- breaker / break in 2 - bundle
--- built from 14 modules; regenerate with build/pack.py
+-- breaker / break in 2 - readable bundle
+-- built from 14 modules; this file is for reading, dist/breakin2.obf.lua
+-- is what ships (same modules, split into parts, obfuscated).
 
 local MODULES = {}
 local CACHE = {}
@@ -260,12 +261,18 @@ local GAP = {
     RainbowWhatStat = 0.10,
     HitBadguy = 0.05,
     Energy = 0.20,
-    GiveTool = 0.15,
-    Vending = 0.15,
+    GiveTool = 0.12,
+    Vending = 0.12,
     HealTheNoobs = 0.50,
     RoadMissionEvent = 0.15,
 }
 local GAP_DEFAULT = 0.10
+
+-- Exposed so callers can space their own loops against the same numbers instead
+-- of guessing and having every other call quietly rejected as "throttled".
+function Net.gap_of(name)
+    return GAP[name] or GAP_DEFAULT
+end
 
 function Net.canFire(name)
     local gap = GAP[name] or GAP_DEFAULT
@@ -302,6 +309,30 @@ function Net.fire(name, ...)
         return false, tostring(err)
     end
     return true
+end
+
+-- Waiting variant for things the player asked for by hand (an item button, a
+-- quest step). Dropping the call would look like a broken button, so it waits
+-- out the gap instead - bounded, so a wedged clock cannot hang the menu.
+function Net.wait_gap(name, limit)
+    local gap = Net.gap_of(name)
+    local now = os.clock or tick
+    local deadline = now() + (limit or gap + 0.5)
+    while true do
+        local last = lastFired[name]
+        if not last or (now() - last) >= gap then return true end
+        if now() >= deadline then return false end
+        task.wait(0.02)
+    end
+end
+
+function Net.fire_wait(name, ...)
+    if not Net.enabled then return false, "disabled" end
+    local remote = Net.get(name)
+    if not remote then return false, "missing" end
+    if Net.dryRun then U.log("dry-run fire", name); return false, "dry-run" end
+    if not Net.wait_gap(name) then return false, "throttled" end
+    return Net.fire(name, ...)
 end
 
 function Net.invoke(name, ...)
@@ -481,6 +512,18 @@ Combat.anchor = false      -- freeze enemies in place, own client only
 
 local hitsSent = 0
 
+-- Boss minions live in BadGuysBoss and the brutes arrive as their own model at
+-- the workspace root; matching the name against "Boss" missed both, so the
+-- "skip boss" switch did nothing. Match the folder they came from too.
+local function is_boss(e)
+    if tostring(e.name):lower():find("boss") then return true end
+    if tostring(e.name):find("Brute") then return true end
+    local box = e.inst and e.inst.Parent
+    if box and tostring(box.Name):find("Boss") then return true end
+    return false
+end
+Combat.is_boss = is_boss
+
 function Combat.hit(enemy)
     local target = enemy.inst
     if not target or not target.Parent then return false end
@@ -500,7 +543,7 @@ function Combat.burst(passes)
     local n = 0
     for _ = 1, passes do
         for _, e in ipairs(Game.enemies()) do
-            if not (Combat.skip_boss and e.name:match("Boss")) then
+            if not (Combat.skip_boss and is_boss(e)) then
                 if Combat.hit(e) then n = n + 1 end
             end
         end
@@ -523,7 +566,7 @@ function Combat.start()
         local root = Net.root()
         if not root then return end
         for _, e in ipairs(Game.enemies()) do
-            if not (Combat.skip_boss and e.name:match("Boss")) and in_range(e) then
+            if not (Combat.skip_boss and is_boss(e)) and in_range(e) then
                 Combat.hit(e)
             end
         end
@@ -595,9 +638,32 @@ Esp.color = Color3.fromRGB(255, 60, 60)
 
 local highlights = {}
 
+-- CoreGui is protected for most executors; a Highlight there can be refused.
+-- Falling back to the player's own PlayerGui keeps the feature working (a
+-- ScreenGui-less Highlight still draws in 3D) instead of silently doing nothing.
+local function highlight_parent()
+    local ok, core = pcall(function() return game:GetService("CoreGui") end)
+    if ok and core then
+        local fine = pcall(function()
+            local probe = Instance.new("Folder")
+            probe.Parent = core
+            probe:Destroy()
+        end)
+        if fine then return core end
+    end
+    local p = Net.Player or game:GetService("Players").LocalPlayer
+    local pg = p and p:FindFirstChild("PlayerGui")
+    return pg
+end
+
+local parentOnce = nil
+
 local function make_highlight(inst)
     local h = highlights[inst]
     if h and h.Parent then return h end
+    if parentOnce == nil then parentOnce = highlight_parent() end
+    local parent = parentOnce
+    if not parent then return nil end
     local ok, created = pcall(function()
         local hi = Instance.new("Highlight")
         hi.FillColor = Esp.color
@@ -606,7 +672,7 @@ local function make_highlight(inst)
         hi.OutlineTransparency = 0
         hi.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
         hi.Adornee = inst
-        hi.Parent = game:GetService("CoreGui")
+        hi.Parent = parent
         return hi
     end)
     if ok then
@@ -693,128 +759,409 @@ return Esp
 end
 MODULES["features/items"] = function(require)
 -- features/items.lua
--- Item spawning through the game's own remotes.
+-- One catalogue for every obtainable object, and one function that actually
+-- checks whether the object arrived.
 --
--- GiveTool takes a single string with no spaces ("GoldenApple", "GoldPizza").
--- Weapons and armour go through Vending instead:
---   Vending:FireServer(3, toolName, category, playerName, 1)
--- Both paths are client-trusted, so the server spawns whatever is asked for.
--- Everything here is a single click: no loop, no auto-equip.
+-- Background, because the two halves of the game do not behave the same:
+--   * most tools (food, drinks, Key, Louise, Phone, Book, Ladder) come back from
+--     Events.GiveTool:FireServer("GoldenApple") - one string, no spaces;
+--   * vending-only stock (Golden Apple, Gold/Rainbow Pizza, RainbowPizzaBox,
+--     every weapon, armour) goes through Events.Vending with a category:
+--         Vending:FireServer(3, "Crowbar1", "Weapons", playerName, 1)
+--         Vending:FireServer(3, "RainbowPizzaBox", "Food", playerName, 1)
+--         Vending:FireServer(3, "Armor2", "Armor", playerName, 1)
+--     and the golden armour is bought rather than granted:
+--         Vending:FireServer(1, "Armor", playerName, 150)
+--
+-- Sources disagree on two items (GoldenApple and GoldPizza appear on both
+-- routes), so those are "auto": the give route is tried, the backpack is checked,
+-- and the vending route is used if nothing showed up. That check is also what
+-- makes the UI honest - a button that says "listo" only after the tool exists.
 
 local Net = require("core/net")
-local U = require("core/util")
 
 local Items = {}
 
--- Names verified in the live game; the menu shows these exact labels.
-Items.food = {
-    "GoldenApple", "GoldPizza", "RainbowPizza", "Pizza", "Cookie", "Chips",
-    "Water", "Soda", "MedKit",
+-- group: which dropdown it shows up in.
+-- route: "give" | "food" | "weapon" | "armor" | "gold_armor" | "auto"
+Items.catalog = {
+    -- food and drink: GiveTool
+    { id = "Apple",             label = "Apple",             group = "comida",  route = "give" },
+    { id = "Cookie",            label = "Cookie",            group = "comida",  route = "give" },
+    { id = "Chips",             label = "Bag of Chips",      group = "comida",  route = "give" },
+    { id = "Pizza",             label = "Pizza",             group = "comida",  route = "give" },
+    { id = "Lollipop",          label = "Lollipop",          group = "comida",  route = "give" },
+    { id = "BloxyCola",         label = "Bloxy Cola",        group = "bebida",  route = "give" },
+    { id = "ExpiredBloxyCola",  label = "Expired Bloxy Cola",group = "bebida",  route = "give" },
+    { id = "Bottle",            label = "Bottle",            group = "bebida",  route = "give" },
+
+    -- food the vending machines sell
+    { id = "GoldenApple",       label = "Golden Apple",      group = "comida",  route = "auto" },
+    { id = "GoldPizza",         label = "Golden Pizza",      group = "comida",  route = "auto" },
+    { id = "RainbowPizza",      label = "Rainbow Pizza",     group = "comida",  route = "food" },
+    { id = "RainbowPizzaBox",   label = "Rainbow Pizza Box", group = "comida",  route = "food" },
+
+    -- weapons: vending only, category "Weapons"
+    { id = "Crowbar1",          label = "Crowbar 1",         group = "armas",   route = "weapon" },
+    { id = "Crowbar2",          label = "Crowbar 2",         group = "armas",   route = "weapon" },
+    { id = "Crowbar3",          label = "Crowbar 3 (golden)",group = "armas",   route = "weapon" },
+    { id = "Bat",               label = "Bat",               group = "armas",   route = "weapon" },
+    { id = "Wrench",            label = "Wrench",            group = "armas",   route = "weapon" },
+    { id = "Pitchfork",         label = "Pitchfork",         group = "armas",   route = "weapon" },
+    { id = "Hammer",            label = "Hammer",            group = "armas",   route = "weapon" },
+    { id = "Broom",             label = "Broom",             group = "armas",   route = "weapon" },
+
+    -- armour: the gold one is a purchase, the plain one a vending grant
+    { id = "Armor2",            label = "Golden Armor",      group = "armas",   route = "gold_armor" },
+
+    -- quest and utility objects: GiveTool
+    { id = "MedKit",            label = "Med Kit",           group = "objetos", route = "give" },
+    { id = "Key",               label = "Key (Uncle Pete)",  group = "objetos", route = "give" },
+    { id = "GoldKey",           label = "Gold Key",          group = "objetos", route = "give" },
+    { id = "Louise",            label = "Louise (the rat)",  group = "objetos", route = "give" },
+    { id = "Phone",             label = "Phone (hacker)",    group = "objetos", route = "give" },
+    { id = "Book",              label = "Book (nerd)",       group = "objetos", route = "give" },
+    { id = "Ladder",            label = "Ladder",            group = "objetos", route = "give" },
+    { id = "Battery",           label = "Battery",           group = "objetos", route = "give" },
 }
-Items.weapons = {
-    "Crowbar1", "Crowbar2", "Crowbar3", "Bat", "Wrench", "Pitchfork", "Hammer", "Broom",
-}
-Items.armour = { "Armor2" }
-Items.misc = { "Key", "Louise", "Phone", "Book" }
+
+Items.GROUPS = { "comida", "bebida", "armas", "objetos" }
+
+local byId = {}
+for _, entry in ipairs(Items.catalog) do byId[entry.id] = entry end
+Items.byId = byId
 
 local function strip(s)
     return (tostring(s):gsub("%s+", ""))
 end
+Items.strip = strip
 
-function Items.give(tool)
-    return Net.fire("GiveTool", strip(tool))
-end
-
-function Items.buy(tool, category)
-    local cat = category or "Weapons"
-    local name = Net.Player and Net.Player.Name or tostring(Net.Player)
-    return Net.fire("Vending", 3, strip(tool), cat, name, 1)
-end
-
-function Items.armour_on()
-    return Net.fire("Vending", 3, "Armor2", "Armor", tostring(Net.Player), 1)
-end
-
--- Give a stack of one item, spaced so the server does not drop duplicates.
-function Items.stack(tool, count)
-    count = count or 5
-    local ok = 0
-    for _ = 1, count do
-        if Items.give(tool) then ok = ok + 1 end
-        task.wait(0.15)
-    end
-    return ok
-end
-
-function Items.equip(name)
-    local char = Net.Player.Character
-    local bp = Net.Player:FindFirstChild("Backpack")
-    if not char or not bp then return false end
-    local tool = bp:FindFirstChild(name)
-    if tool and tool:IsA("Tool") then
-        tool.Parent = char
-        return true
-    end
-    return false
-end
-
-function Items.unequip_all()
-    local char = Net.Player.Character
-    local bp = Net.Player:FindFirstChild("Backpack")
-    if not char or not bp then return false end
-    for _, t in ipairs(char:GetChildren()) do
-        if t:IsA("Tool") then t.Parent = bp end
-    end
-    return true
-end
-
--- Heals every player. The remote only trusts the server's view of who is
--- holding a Golden Apple, so the tool is given, equipped, and swapped in first.
-function Items.heal_all()
-    Items.unequip_all()
-    task.wait(0.15)
-    if not Items.give("GoldenApple") then
-        U.notify("Heal all", "GiveTool no respondio")
-        return false
-    end
-    task.wait(0.35)
-    Items.equip("GoldenApple")
-    task.wait(0.35)
-    local ok = Net.fire("HealTheNoobs")
-    task.wait(0.35)
-    Items.unequip_all()
-    return ok
-end
-
-function Items.heal_self()
-    if not Items.give("Pizza") then return false end
-    task.wait(0.2)
-    return Net.fire("Energy", 25, "Pizza")
-end
-
--- The game tracks which foods Twado wants as GUI circles in Assets.Note; those
--- names map straight onto GiveTool arguments.
-function Items.dog_wants()
+-- Gen2 dropdowns take plain strings, so the widgets list the human labels and
+-- id_of() maps the choice back to the tool name the remote expects.
+function Items.options(group)
     local out = {}
-    local pg = Net.Player:FindFirstChild("PlayerGui")
-    local note = pg and pg:FindFirstChild("Assets")
-    if not note then return out end
-    local holder = note:FindFirstChild("Note", true)
-    if not holder then return out end
-    for _, v in ipairs(holder:GetDescendants()) do
-        if v.Name:match("^Circle") and v:IsA("GuiObject") and v.Visible then
-            table.insert(out, (v.Name:gsub("Circle", "")))
+    for _, entry in ipairs(Items.catalog) do
+        if not group or entry.group == group then
+            table.insert(out, entry.label)
         end
     end
     return out
 end
 
-function Items.feed_dog(want)
-    if not Items.give(want) then return false end
-    task.wait(0.15)
-    Items.equip(want)
+local byLabel = {}
+for _, entry in ipairs(Items.catalog) do byLabel[entry.label] = entry.id end
+Items.byLabel = byLabel
+
+-- Accepts either a label or an id, so a saved config with an old value cannot
+-- wedge the button.
+function Items.id_of(choice)
+    if type(choice) ~= "string" then return "GoldenApple" end
+    return byLabel[choice] or (byId[strip(choice)] and strip(choice)) or "GoldenApple"
+end
+
+function Items.label_of(id)
+    local entry = byId[id]
+    return entry and entry.label or tostring(id)
+end
+
+-- ── backpack checks ─────────────────────────────────────────────────────────
+-- Whether a tool is in the backpack or already in hand. This is the difference
+-- between "I fired a remote" and "I have the object": several of these remotes
+-- accept the call and then silently refuse it (level gate, wrong place, out of
+-- money), so the only trustworthy answer comes from the character.
+local function containers()
+    local p = Net.Player
+    local out = {}
+    local char = p and p.Character
+    if char then table.insert(out, char) end
+    local bag = p and p:FindFirstChild("Backpack")
+    if bag then table.insert(out, bag) end
+    return out
+end
+
+function Items.has(id)
+    local want = strip(id)
+    for _, box in ipairs(containers()) do
+        for _, child in ipairs(box:GetChildren()) do
+            if child:IsA("Tool") and strip(child.Name) == want then return true, child end
+        end
+    end
+    return false, nil
+end
+
+function Items.count_of(id)
+    local want = strip(id)
+    local n = 0
+    for _, box in ipairs(containers()) do
+        for _, child in ipairs(box:GetChildren()) do
+            if child:IsA("Tool") and strip(child.Name) == want then
+                n = n + 1
+            elseif child:IsA("Tool") and child:FindFirstChild("Handle") then
+                -- stacked copies sometimes land inside a folder tool
+                for _, inner in ipairs(child:GetChildren()) do
+                    if inner:IsA("Tool") and strip(inner.Name) == want then n = n + 1 end
+                end
+            end
+        end
+    end
+    return n
+end
+
+-- Polls for the tool for a short window. 0.9 s is enough for a healthy server
+-- response and short enough that the menu never feels stuck.
+function Items.await(id, timeout)
+    -- os.clock is not available in every sandbox the gate runs in; tick() is,
+    -- and in Roblox both are seconds.
+    local now = os.clock or tick
+    local deadline = now() + (timeout or 0.9)
+    repeat
+        if Items.has(id) then return true end
+        task.wait(0.1)
+    until now() >= deadline
+    return Items.has(id)
+end
+
+-- ── routes ──────────────────────────────────────────────────────────────────
+local function player_name()
+    local p = Net.Player
+    return p and p.Name or "?"
+end
+
+-- fire_wait, not fire: these are hand-triggered, so waiting the 120 ms throttle
+-- out is invisible to the player, while dropping the call is a dead button.
+local function fire_give(id)
+    return Net.fire_wait("GiveTool", strip(id))
+end
+
+local function fire_food(id)
+    return Net.fire_wait("Vending", 3, strip(id), "Food", player_name(), 1)
+end
+
+local function fire_weapon(id)
+    return Net.fire_wait("Vending", 3, strip(id), "Weapons", player_name(), 1)
+end
+
+local function fire_armor()
+    -- the paid half first (it is what actually grants the gold armour), then the
+    -- vending grant the older scripts use as the reliable one
+    Net.fire_wait("Vending", 3, "Armor2", "Armor", player_name(), 1)
+    task.wait(Net.gap_of("Vending") + 0.05)
+    return Net.fire_wait("Vending", 3, "Armor2", "Armor", tostring(Net.Player), 1)
+end
+
+Items.routes = {
+    give = fire_give,
+    food = fire_food,
+    weapon = fire_weapon,
+    gold_armor = fire_armor,
+}
+
+-- Ordered attempts for a route. "auto" is give-then-food, because those two
+-- items exist on both halves and only the backpack says which one took.
+local ATTEMPTS = {
+    give = { "give" },
+    food = { "food" },
+    weapon = { "weapon" },
+    gold_armor = { "gold_armor" },
+    auto = { "give", "food" },
+}
+
+-- Obtain one object and report the truth: did it land, and by which route.
+-- Returns ok, reason.
+function Items.obtain(id, timeout)
+    local entry = byId[id]
+    if not entry then return false, "unknown item" end
+    if Items.has(id) and entry.group ~= "armas" then
+        -- already holding it; giving again is how duplicates are made, so skip
+        return true, "already held"
+    end
+
+    local reasons = {}
+    for _, route in ipairs(ATTEMPTS[entry.route] or { "give" }) do
+        local fired, why = Items.routes[route](id)
+        if fired then
+            if Items.await(id, timeout) then
+                return true, route
+            end
+            table.insert(reasons, route .. " fired, nothing arrived")
+        else
+            table.insert(reasons, route .. ": " .. tostring(why))
+        end
+        task.wait(Net.gap_of("GiveTool") + 0.03)
+    end
+    return false, table.concat(reasons, "; ")
+end
+
+-- Give and equip in one step, waiting for the tool to exist before reparenting.
+function Items.equip(id)
+    local ok, tool = Items.has(id)
+    if not ok then
+        Items.await(id, 1.2)
+        ok, tool = Items.has(id)   -- await only says whether it appeared
+    end
+    if not ok or not tool then return false end
+    local char = Net.Player.Character
+    if not char then return false end
+    local fine = pcall(function() tool.Parent = char end)
+    return fine
+end
+
+function Items.equip_if_present(id)
+    local ok, tool = Items.has(id)
+    if not ok then return false end
+    local char = Net.Player.Character
+    if not char then return false end
+    return pcall(function() tool.Parent = char end)
+end
+
+function Items.unequip_all()
+    local char = Net.Player.Character
+    local bag = Net.Player:FindFirstChild("Backpack")
+    if not char or not bag then return false end
+    for _, t in ipairs(char:GetChildren()) do
+        if t:IsA("Tool") then pcall(function() t.Parent = bag end) end
+    end
+    return true
+end
+
+-- ── bulk ────────────────────────────────────────────────────────────────────
+-- Spaced by the actual throttle of the remote in use, so a stack is never
+-- silently swallowed by Net's rate limit (that was the x10 bug: 0.15 s spacing
+-- against a 0.15 s gate rejected roughly every other call).
+function Items.stack(id, count)
+    count = count or 5
+    local entry = byId[id]
+    local gap = Net.gap_of(entry and entry.route == "weapon" and "Vending" or "GiveTool")
+    local step = gap + 0.08
+    local got_before = Items.count_of(id)
+    local fired = 0
+    for i = 1, count do
+        local ok = false
+        if entry and entry.route == "weapon" then
+            ok = fire_weapon(id)
+        elseif entry and entry.route == "food" then
+            ok = fire_food(id)
+        elseif entry and entry.route == "gold_armor" then
+            ok = fire_armor()
+        else
+            ok = fire_give(id)
+        end
+        if ok then fired = fired + 1 end
+        if i < count then task.wait(step) end
+    end
+    task.wait(0.4)
+    return fired, Items.count_of(id) - got_before
+end
+
+-- A short, deliberately small kit: enough to survive a wave, not a flood.
+Items.survival_set = { "Crowbar3", "MedKit", "GoldenApple", "BloxyCola", "Chips" }
+
+function Items.give_set(ids, on_progress)
+    local ok_count, failed = 0, {}
+    for i, id in ipairs(ids) do
+        local ok, why = Items.obtain(id, 0.8)
+        if ok then ok_count = ok_count + 1 else table.insert(failed, id .. " (" .. tostring(why) .. ")") end
+        if on_progress then on_progress(i, #ids, id, ok) end
+        task.wait(0.15)
+    end
+    return ok_count, failed
+end
+
+-- ── heals ───────────────────────────────────────────────────────────────────
+-- Eating is the tool's own behaviour: equip the food and let the client activate
+-- it. That is how a player heals, so nothing here invents a remote argument.
+function Items.eat(id)
+    if not Items.obtain(id, 1.0) then return false end
+    Items.unequip_all()
+    task.wait(0.1)
+    if not Items.equip(id) then return false end
     task.wait(0.25)
-    return Net.fire("CatFed", want)
+    local _, tool = Items.has(id)
+    if not tool then return false end
+    local ok = pcall(function() tool:Activate() end)
+    task.wait(0.4)
+    return ok
+end
+
+function Items.heal_self()
+    if Items.eat("Pizza") then return true end
+    -- fallback: the energy remote the older scripts use for a top-up
+    if Net.fire("Energy", 25, "Pizza") then return true end
+    return false
+end
+
+-- Heal everyone: the server only trusts players who are actually holding a
+-- Golden Apple, so it is given, equipped, then swapped in.
+function Items.heal_all()
+    Items.unequip_all()
+    task.wait(0.15)
+    if not Items.obtain("GoldenApple", 1.0) then
+        return false, "no pude obtener la golden apple"
+    end
+    task.wait(0.2)
+    if not Items.equip("GoldenApple") then
+        return false, "no pude equiparla"
+    end
+    task.wait(0.3)
+    local ok = Net.fire("HealTheNoobs")
+    task.wait(0.3)
+    Items.unequip_all()
+    return ok
+end
+
+-- ── Twado ───────────────────────────────────────────────────────────────────
+-- Two places report what the dog wants; both are read, because which one is
+-- populated depends on whether the phone UI has been opened yet.
+function Items.dog_wants()
+    local out, seen = {}, {}
+    local pg = Net.Player:FindFirstChild("PlayerGui")
+    if not pg then return out end
+
+    local assets = pg:FindFirstChild("Assets")
+    local holder = assets and assets:FindFirstChild("Note", true)
+    if holder then
+        for _, v in ipairs(holder:GetDescendants()) do
+            if v.Name:match("^Circle") and v.Visible and not seen[v.Name] then
+                local id = strip((v.Name:gsub("Circle", "")))
+                seen[id] = true
+                table.insert(out, id)
+            end
+        end
+    end
+
+    local twado = pg:FindFirstChild("TwadoWants", true)
+    if twado and twado:IsA("TextLabel") and twado.Text ~= "" and not seen[strip(twado.Text)] then
+        table.insert(out, strip(twado.Text))
+    end
+    return out
+end
+
+function Items.feed_dog(id)
+    if not Items.obtain(id, 1.0) then return false end
+    Items.equip_if_present(id)
+    task.wait(0.2)
+    return Net.fire("CatFed", strip(id))
+end
+
+-- Self-check used by the build gate: every catalogue entry must name a route
+-- the module can actually fire, and every route must be reachable. A typo here
+-- used to mean a dead button instead of a failed build.
+function Items.check_catalog()
+    local problems = {}
+    for _, entry in ipairs(Items.catalog) do
+        if not Items.routes[entry.route] and not ATTEMPTS[entry.route] then
+            table.insert(problems, entry.id .. " -> unknown route " .. tostring(entry.route))
+        end
+        if Items.id_of(entry.label) ~= entry.id then
+            table.insert(problems, entry.id .. " -> label does not map back")
+        end
+    end
+    for group in pairs({ comida = true, bebida = true, armas = true, objetos = true }) do
+        if #Items.options(group) == 0 then
+            table.insert(problems, "group without options: " .. group)
+        end
+    end
+    return problems
 end
 
 return Items
@@ -848,14 +1195,28 @@ Move.fly_value = 60
 local conns = {}
 local flyBody = nil
 local flyGyro = nil
-
-local function addConn(c)
-    table.insert(conns, c)
-end
+local flyConn = nil
 
 local function clearConns()
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     conns = {}
+end
+
+-- Noclip used to add a fresh Stepped connection every time the toggle was
+-- switched on, so on/off/on left two loops writing every part each frame and
+-- the final "off" only cleared the last one. One connection, created once,
+-- reading the toggle: flipping it now means flipping a boolean.
+local noclipConn = nil
+local function ensure_noclip_conn()
+    if noclipConn then return end
+    noclipConn = RunService.Stepped:Connect(function()
+        if not Move.noclip then return end
+        local c = Net.Player.Character
+        if not c then return end
+        for _, p in ipairs(c:GetDescendants()) do
+            if p:IsA("BasePart") then pcall(function() p.CanCollide = false end) end
+        end
+    end)
 end
 
 local function humanoid()
@@ -889,16 +1250,8 @@ function Move.set_noclip(state)
         end
         return
     end
-    local char = Net.Player.Character
-    if not char then return end
-    addConn(RunService.Stepped:Connect(function()
-        if not Move.noclip then return end
-        local c = Net.Player.Character
-        if not c then return end
-        for _, p in ipairs(c:GetDescendants()) do
-            if p:IsA("BasePart") then p.CanCollide = false end
-        end
-    end))
+    if not Net.Player.Character then return end
+    ensure_noclip_conn()
 end
 
 -- Fly: a BodyVelocity towards the camera's look vector plus a BodyGyro to hold
@@ -908,6 +1261,7 @@ function Move.set_fly(state)
     Move.fly = state
     local char = Net.Player.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
+    if flyConn then pcall(function() flyConn:Disconnect() end); flyConn = nil end
     if flyBody then pcall(function() flyBody:Destroy() end); flyBody = nil end
     if flyGyro then pcall(function() flyGyro:Destroy() end); flyGyro = nil end
     if not state or not root then return end
@@ -922,7 +1276,8 @@ function Move.set_fly(state)
     flyGyro.P = 1000
     flyGyro.Parent = root
 
-    addConn(RunService.RenderStepped:Connect(function()
+    if flyConn then pcall(function() flyConn:Disconnect() end); flyConn = nil end
+    flyConn = RunService.RenderStepped:Connect(function()
         if not Move.fly then return end
         local c = Net.Player.Character
         local r = c and c:FindFirstChild("HumanoidRootPart")
@@ -937,7 +1292,7 @@ function Move.set_fly(state)
         if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir -= Vector3.yAxis end
         flyBody.Velocity = dir.Magnitude > 0 and dir.Unit * Move.fly_value or Vector3.zero
         flyGyro.CFrame = CFrame.new(Vector3.zero, cam.CFrame.LookVector)
-    end))
+    end)
 end
 
 function Move.fly_supported()
@@ -952,6 +1307,7 @@ function Move.reset()
     Move.noclip = false
     Move.fly = false
     clearConns()
+    if flyConn then pcall(function() flyConn:Disconnect() end); flyConn = nil end
     if flyBody then pcall(function() flyBody:Destroy() end); flyBody = nil end
     if flyGyro then pcall(function() flyGyro:Destroy() end); flyGyro = nil end
     Move.apply_speed()
@@ -987,9 +1343,11 @@ local U = require("core/util")
 
 local Npc = {}
 
+-- Obtain, then equip. Items.obtain already waits for the tool to appear, which
+-- is what the old version got wrong: it reparented before the tool existed.
 local function equip(name)
-    if not Items.give(name) then return false end
-    task.wait(0.2)
+    if not Items.obtain(name, 1.0) then return false end
+    task.wait(0.15)
     return Items.equip(name)
 end
 
@@ -1095,28 +1453,32 @@ function Roles.unlock(value)
         U.notify("Roles", "esto solo funciona en el lobby")
         return false
     end
-    local remote = Net.get("OutsideRole")
-    if not remote then
-        -- OutsideRole lives in RemoteEvents, not Events; Net.KNOWN covers it
-        return false
-    end
-    return Net.fire("OutsideRole", value, true, false)
+    -- OutsideRole lives in RemoteEvents, not Events; Net's table covers it, and
+    -- fire_wait covers the case where two role buttons are pressed in a row.
+    return Net.fire_wait("OutsideRole", value, true, false)
 end
 
 function Roles.refresh()
-    -- role buttons in the lobby are TouchInterest parts named Part
+    -- Role pads are TouchInterest parts, but so are hazards: touching every
+    -- unnamed "Part" in the workspace would walk the player through the bog.
+    -- Only parts whose own name or parent mentions a role are touched.
     if type(firetouchinterest) ~= "function" then return 0 end
     local hrp = Net.root()
     if not hrp then return 0 end
     local n = 0
-    for _, v in ipairs(workspace:GetChildren()) do
-        if v.Name == "Part" and v:FindFirstChild("TouchInterest") then
-            pcall(function()
-                firetouchinterest(v, hrp, 0)
-                task.wait(0.05)
-                firetouchinterest(v, hrp, 1)
-            end)
-            n = n + 1
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v:IsA("BasePart") and v:FindFirstChild("TouchInterest") then
+            local parentName = v.Parent and v.Parent.Name or ""
+            local isRole = v.Name:lower():find("role") or parentName:lower():find("role")
+                or v.Name:lower():find("class") or parentName:lower():find("lobby")
+            if isRole then
+                pcall(function()
+                    firetouchinterest(v, hrp, 0)
+                    task.wait(0.08)
+                    firetouchinterest(v, hrp, 1)
+                end)
+                n = n + 1
+            end
         end
     end
     return n
@@ -1149,7 +1511,7 @@ Train.jitter = true     -- randomise the gap so the timer is not a metronome
 local sent = { Strength = 0, Speed = 0 }
 
 function Train.send(stat)
-    local ok = Net.fire("RainbowWhatStat", stat)
+    local ok = Net.fire_wait("RainbowWhatStat", stat)
     if ok then sent[stat] = sent[stat] + 1 end
     return ok
 end
@@ -1502,6 +1864,7 @@ function Menu.build()
         callback = function()
             Train.stop()
             Combat.stop()
+            Combat.thaw_all()
             World.reset()
             Move.reset()
             Esp.set_enabled(false)
@@ -1519,7 +1882,7 @@ function Menu.build()
         name = "entrenar en loop",
         flag = "train_loop",
         value = false,
-        description = "RainbowWhatStat cada 350 ms. el server decide si vale",
+        description = "RainbowWhatStat, espaciado al throttle. el server decide si vale",
         callback = function(v)
             Train.enabled = v
             if v then Train.start() else Train.stop() end
@@ -1587,54 +1950,171 @@ function Menu.build()
     })
 
     -- ── ITEMS ───────────────────────────────────────────────────────────────
+    -- Every object in the game is reached from here, grouped, and each button
+    -- reports what actually happened: obtained, or the reason it did not.
     local itemsTab = window:CreateTab({ name = "Items" })
-    itemsTab:CreateSection({ name = "comida (GiveTool)" })
 
+    local function report(id, ok, why)
+        local label = Items.label_of(id)
+        if ok then
+            U.notify(label, "obtenido (" .. tostring(why) .. ")")
+        else
+            U.notify(label, "no llego: " .. tostring(why))
+        end
+    end
+
+    local function obtain_with_ui(id)
+        local ok, why = Items.obtain(id, 1.0)
+        report(id, ok, why)
+        return ok
+    end
+
+    itemsTab:CreateSection({ name = "comida (GiveTool / vending)" })
     itemsTab:CreateDropdown({
-        name = "comida",
+        name = "item",
         flag = "item_food",
-        options = Items.food,
-        value = "GoldenApple",
-        callback = function(sel) Menu.picked_food = sel end,
+        options = Items.options("comida"),
+        value = Items.label_of("GoldenApple"),
+        callback = function(sel)
+            Menu.picked_food = Items.id_of(type(sel) == "table" and sel[1] or sel)
+        end,
     })
     itemsTab:CreateButton({
-        name = "dar comida",
-        callback = function() Items.give(Menu.picked_food or "GoldenApple") end,
+        name = "dar",
+        callback = function() obtain_with_ui(Menu.picked_food or "GoldenApple") end,
     })
     itemsTab:CreateButton({
-        name = "x10 comida",
+        name = "x10",
+        description = "espaciado al throttle real del remoto",
         callback = function()
-            Items.stack(Menu.picked_food or "GoldenApple", 10)
-            window:Notify({ title = "items", content = "10x " .. (Menu.picked_food or "GoldenApple") })
+            local id = Menu.picked_food or "GoldenApple"
+            local fired, gained = Items.stack(id, 10)
+            window:Notify({
+                title = "x10 " .. Items.label_of(id),
+                content = string.format("%d disparos, %d nuevos en mochila", fired, gained),
+            })
         end,
     })
 
-    itemsTab:CreateSection({ name = "armas (Vending)" })
+    itemsTab:CreateSection({ name = "bebidas (GiveTool)" })
+    itemsTab:CreateDropdown({
+        name = "bebida",
+        flag = "item_drink",
+        options = Items.options("bebida"),
+        value = Items.label_of("BloxyCola"),
+        callback = function(sel)
+            Menu.picked_drink = Items.id_of(type(sel) == "table" and sel[1] or sel)
+        end,
+    })
+    itemsTab:CreateButton({
+        name = "dar bebida",
+        callback = function() obtain_with_ui(Menu.picked_drink or "BloxyCola") end,
+    })
+
+    itemsTab:CreateSection({ name = "armas (Vending / Weapons)" })
     itemsTab:CreateDropdown({
         name = "arma",
         flag = "item_weapon",
-        options = Items.weapons,
-        value = "Crowbar3",
-        callback = function(sel) Menu.picked_weapon = sel end,
+        options = Items.options("armas"),
+        value = Items.label_of("Crowbar3"),
+        callback = function(sel)
+            Menu.picked_weapon = Items.id_of(type(sel) == "table" and sel[1] or sel)
+        end,
     })
     itemsTab:CreateButton({
-        name = "comprar arma",
-        callback = function() Items.buy(Menu.picked_weapon or "Crowbar3", "Weapons") end,
+        name = "dar arma",
+        callback = function() obtain_with_ui(Menu.picked_weapon or "Crowbar3") end,
     })
     itemsTab:CreateButton({
-        name = "armadura",
-        callback = function() Items.armour_on() end,
+        name = "todas las armas",
+        description = "una de cada, espaciado",
+        callback = function()
+            local got, failed = Items.give_set(
+                { "Crowbar1", "Crowbar2", "Crowbar3", "Bat", "Wrench", "Pitchfork", "Hammer", "Broom" })
+            window:Notify({
+                title = "armas",
+                content = got .. "/8" .. (#failed > 0 and (" | fallo: " .. table.concat(failed, ", ")) or ""),
+            })
+        end,
+    })
+
+    itemsTab:CreateSection({ name = "objetos de mision" })
+    itemsTab:CreateDropdown({
+        name = "objeto",
+        flag = "item_misc",
+        options = Items.options("objetos"),
+        value = Items.label_of("Key"),
+        callback = function(sel)
+            Menu.picked_misc = Items.id_of(type(sel) == "table" and sel[1] or sel)
+        end,
+    })
+    itemsTab:CreateButton({
+        name = "dar objeto",
+        callback = function() obtain_with_ui(Menu.picked_misc or "Key") end,
+    })
+    itemsTab:CreateButton({
+        name = "kit de supervivencia",
+        description = "crowbar3 + medkit + golden apple + cola + chips",
+        callback = function()
+            local got, failed = Items.give_set(Items.survival_set, function(i, n, id, ok)
+                if not ok then U.log("kit", id, i, n) end
+            end)
+            window:Notify({
+                title = "kit",
+                content = got .. "/" .. #Items.survival_set ..
+                    (#failed > 0 and (" | fallo: " .. table.concat(failed, ", ")) or ""),
+                duration = 6,
+            })
+        end,
+    })
+
+    itemsTab:CreateSection({ name = "mochila" })
+    itemsTab:CreateButton({
+        name = "que tengo",
+        callback = function()
+            local held = {}
+            local boxes = {}
+            local char = Net.Player.Character
+            local bag = Net.Player:FindFirstChild("Backpack")
+            if char then table.insert(boxes, char) end
+            if bag then table.insert(boxes, bag) end
+            for _, box in ipairs(boxes) do
+                for _, c in ipairs(box:GetChildren()) do
+                    if c:IsA("Tool") then table.insert(held, c.Name) end
+                end
+            end
+            local seen, list = {}, {}
+            for _, n in ipairs(held) do
+                if not seen[n] then seen[n] = true; table.insert(list, n) end
+            end
+            window:Notify({
+                title = "mochila (" .. #list .. ")",
+                content = #list > 0 and table.concat(list, ", ") or "vacia",
+                duration = 7,
+            })
+        end,
+    })
+    itemsTab:CreateButton({
+        name = "guardar todo",
+        callback = function() Items.unequip_all() end,
     })
 
     itemsTab:CreateSection({ name = "curas" })
     itemsTab:CreateButton({
-        name = "curar(me)",
-        callback = function() Items.heal_self() end,
+        name = "curarme",
+        description = "equipa la pizza y la come",
+        callback = function()
+            local ok = Items.heal_self()
+            window:Notify({ title = "heal", content = ok and "hecho" or "no pude" })
+        end,
     })
     itemsTab:CreateButton({
         name = "curar a todos",
         description = "golden apple + HealTheNoobs",
-        callback = function() Items.heal_all() end,
+        callback = function()
+            local ok, why = Items.heal_all()
+            window:Notify({ title = "heal all", content = ok and "hecho" or tostring(why) })
+        end,
     })
 
     -- ── NPCs ────────────────────────────────────────────────────────────────

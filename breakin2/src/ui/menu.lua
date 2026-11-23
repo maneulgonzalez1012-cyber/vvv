@@ -68,6 +68,7 @@ function Menu.build()
         callback = function()
             Train.stop()
             Combat.stop()
+            Combat.thaw_all()
             World.reset()
             Move.reset()
             Esp.set_enabled(false)
@@ -85,7 +86,7 @@ function Menu.build()
         name = "entrenar en loop",
         flag = "train_loop",
         value = false,
-        description = "RainbowWhatStat cada 350 ms. el server decide si vale",
+        description = "RainbowWhatStat, espaciado al throttle. el server decide si vale",
         callback = function(v)
             Train.enabled = v
             if v then Train.start() else Train.stop() end
@@ -153,54 +154,171 @@ function Menu.build()
     })
 
     -- ── ITEMS ───────────────────────────────────────────────────────────────
+    -- Every object in the game is reached from here, grouped, and each button
+    -- reports what actually happened: obtained, or the reason it did not.
     local itemsTab = window:CreateTab({ name = "Items" })
-    itemsTab:CreateSection({ name = "comida (GiveTool)" })
 
+    local function report(id, ok, why)
+        local label = Items.label_of(id)
+        if ok then
+            U.notify(label, "obtenido (" .. tostring(why) .. ")")
+        else
+            U.notify(label, "no llego: " .. tostring(why))
+        end
+    end
+
+    local function obtain_with_ui(id)
+        local ok, why = Items.obtain(id, 1.0)
+        report(id, ok, why)
+        return ok
+    end
+
+    itemsTab:CreateSection({ name = "comida (GiveTool / vending)" })
     itemsTab:CreateDropdown({
-        name = "comida",
+        name = "item",
         flag = "item_food",
-        options = Items.food,
-        value = "GoldenApple",
-        callback = function(sel) Menu.picked_food = sel end,
+        options = Items.options("comida"),
+        value = Items.label_of("GoldenApple"),
+        callback = function(sel)
+            Menu.picked_food = Items.id_of(type(sel) == "table" and sel[1] or sel)
+        end,
     })
     itemsTab:CreateButton({
-        name = "dar comida",
-        callback = function() Items.give(Menu.picked_food or "GoldenApple") end,
+        name = "dar",
+        callback = function() obtain_with_ui(Menu.picked_food or "GoldenApple") end,
     })
     itemsTab:CreateButton({
-        name = "x10 comida",
+        name = "x10",
+        description = "espaciado al throttle real del remoto",
         callback = function()
-            Items.stack(Menu.picked_food or "GoldenApple", 10)
-            window:Notify({ title = "items", content = "10x " .. (Menu.picked_food or "GoldenApple") })
+            local id = Menu.picked_food or "GoldenApple"
+            local fired, gained = Items.stack(id, 10)
+            window:Notify({
+                title = "x10 " .. Items.label_of(id),
+                content = string.format("%d disparos, %d nuevos en mochila", fired, gained),
+            })
         end,
     })
 
-    itemsTab:CreateSection({ name = "armas (Vending)" })
+    itemsTab:CreateSection({ name = "bebidas (GiveTool)" })
+    itemsTab:CreateDropdown({
+        name = "bebida",
+        flag = "item_drink",
+        options = Items.options("bebida"),
+        value = Items.label_of("BloxyCola"),
+        callback = function(sel)
+            Menu.picked_drink = Items.id_of(type(sel) == "table" and sel[1] or sel)
+        end,
+    })
+    itemsTab:CreateButton({
+        name = "dar bebida",
+        callback = function() obtain_with_ui(Menu.picked_drink or "BloxyCola") end,
+    })
+
+    itemsTab:CreateSection({ name = "armas (Vending / Weapons)" })
     itemsTab:CreateDropdown({
         name = "arma",
         flag = "item_weapon",
-        options = Items.weapons,
-        value = "Crowbar3",
-        callback = function(sel) Menu.picked_weapon = sel end,
+        options = Items.options("armas"),
+        value = Items.label_of("Crowbar3"),
+        callback = function(sel)
+            Menu.picked_weapon = Items.id_of(type(sel) == "table" and sel[1] or sel)
+        end,
     })
     itemsTab:CreateButton({
-        name = "comprar arma",
-        callback = function() Items.buy(Menu.picked_weapon or "Crowbar3", "Weapons") end,
+        name = "dar arma",
+        callback = function() obtain_with_ui(Menu.picked_weapon or "Crowbar3") end,
     })
     itemsTab:CreateButton({
-        name = "armadura",
-        callback = function() Items.armour_on() end,
+        name = "todas las armas",
+        description = "una de cada, espaciado",
+        callback = function()
+            local got, failed = Items.give_set(
+                { "Crowbar1", "Crowbar2", "Crowbar3", "Bat", "Wrench", "Pitchfork", "Hammer", "Broom" })
+            window:Notify({
+                title = "armas",
+                content = got .. "/8" .. (#failed > 0 and (" | fallo: " .. table.concat(failed, ", ")) or ""),
+            })
+        end,
+    })
+
+    itemsTab:CreateSection({ name = "objetos de mision" })
+    itemsTab:CreateDropdown({
+        name = "objeto",
+        flag = "item_misc",
+        options = Items.options("objetos"),
+        value = Items.label_of("Key"),
+        callback = function(sel)
+            Menu.picked_misc = Items.id_of(type(sel) == "table" and sel[1] or sel)
+        end,
+    })
+    itemsTab:CreateButton({
+        name = "dar objeto",
+        callback = function() obtain_with_ui(Menu.picked_misc or "Key") end,
+    })
+    itemsTab:CreateButton({
+        name = "kit de supervivencia",
+        description = "crowbar3 + medkit + golden apple + cola + chips",
+        callback = function()
+            local got, failed = Items.give_set(Items.survival_set, function(i, n, id, ok)
+                if not ok then U.log("kit", id, i, n) end
+            end)
+            window:Notify({
+                title = "kit",
+                content = got .. "/" .. #Items.survival_set ..
+                    (#failed > 0 and (" | fallo: " .. table.concat(failed, ", ")) or ""),
+                duration = 6,
+            })
+        end,
+    })
+
+    itemsTab:CreateSection({ name = "mochila" })
+    itemsTab:CreateButton({
+        name = "que tengo",
+        callback = function()
+            local held = {}
+            local boxes = {}
+            local char = Net.Player.Character
+            local bag = Net.Player:FindFirstChild("Backpack")
+            if char then table.insert(boxes, char) end
+            if bag then table.insert(boxes, bag) end
+            for _, box in ipairs(boxes) do
+                for _, c in ipairs(box:GetChildren()) do
+                    if c:IsA("Tool") then table.insert(held, c.Name) end
+                end
+            end
+            local seen, list = {}, {}
+            for _, n in ipairs(held) do
+                if not seen[n] then seen[n] = true; table.insert(list, n) end
+            end
+            window:Notify({
+                title = "mochila (" .. #list .. ")",
+                content = #list > 0 and table.concat(list, ", ") or "vacia",
+                duration = 7,
+            })
+        end,
+    })
+    itemsTab:CreateButton({
+        name = "guardar todo",
+        callback = function() Items.unequip_all() end,
     })
 
     itemsTab:CreateSection({ name = "curas" })
     itemsTab:CreateButton({
-        name = "curar(me)",
-        callback = function() Items.heal_self() end,
+        name = "curarme",
+        description = "equipa la pizza y la come",
+        callback = function()
+            local ok = Items.heal_self()
+            window:Notify({ title = "heal", content = ok and "hecho" or "no pude" })
+        end,
     })
     itemsTab:CreateButton({
         name = "curar a todos",
         description = "golden apple + HealTheNoobs",
-        callback = function() Items.heal_all() end,
+        callback = function()
+            local ok, why = Items.heal_all()
+            window:Notify({ title = "heal all", content = ok and "hecho" or tostring(why) })
+        end,
     })
 
     -- ── NPCs ────────────────────────────────────────────────────────────────

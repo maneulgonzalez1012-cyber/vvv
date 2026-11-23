@@ -21,7 +21,7 @@ Train.jitter = true     -- randomise the gap so the timer is not a metronome
 local sent = { Strength = 0, Speed = 0 }
 
 function Train.send(stat)
-    local ok = Net.fire("RainbowWhatStat", stat)
+    local ok = Net.fire_wait("RainbowWhatStat", stat)
     if ok then sent[stat] = sent[stat] + 1 end
     return ok
 end

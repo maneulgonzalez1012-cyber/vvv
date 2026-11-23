@@ -25,14 +25,28 @@ Move.fly_value = 60
 local conns = {}
 local flyBody = nil
 local flyGyro = nil
-
-local function addConn(c)
-    table.insert(conns, c)
-end
+local flyConn = nil
 
 local function clearConns()
     for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
     conns = {}
+end
+
+-- Noclip used to add a fresh Stepped connection every time the toggle was
+-- switched on, so on/off/on left two loops writing every part each frame and
+-- the final "off" only cleared the last one. One connection, created once,
+-- reading the toggle: flipping it now means flipping a boolean.
+local noclipConn = nil
+local function ensure_noclip_conn()
+    if noclipConn then return end
+    noclipConn = RunService.Stepped:Connect(function()
+        if not Move.noclip then return end
+        local c = Net.Player.Character
+        if not c then return end
+        for _, p in ipairs(c:GetDescendants()) do
+            if p:IsA("BasePart") then pcall(function() p.CanCollide = false end) end
+        end
+    end)
 end
 
 local function humanoid()
@@ -66,16 +80,8 @@ function Move.set_noclip(state)
         end
         return
     end
-    local char = Net.Player.Character
-    if not char then return end
-    addConn(RunService.Stepped:Connect(function()
-        if not Move.noclip then return end
-        local c = Net.Player.Character
-        if not c then return end
-        for _, p in ipairs(c:GetDescendants()) do
-            if p:IsA("BasePart") then p.CanCollide = false end
-        end
-    end))
+    if not Net.Player.Character then return end
+    ensure_noclip_conn()
 end
 
 -- Fly: a BodyVelocity towards the camera's look vector plus a BodyGyro to hold
@@ -85,6 +91,7 @@ function Move.set_fly(state)
     Move.fly = state
     local char = Net.Player.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
+    if flyConn then pcall(function() flyConn:Disconnect() end); flyConn = nil end
     if flyBody then pcall(function() flyBody:Destroy() end); flyBody = nil end
     if flyGyro then pcall(function() flyGyro:Destroy() end); flyGyro = nil end
     if not state or not root then return end
@@ -99,7 +106,8 @@ function Move.set_fly(state)
     flyGyro.P = 1000
     flyGyro.Parent = root
 
-    addConn(RunService.RenderStepped:Connect(function()
+    if flyConn then pcall(function() flyConn:Disconnect() end); flyConn = nil end
+    flyConn = RunService.RenderStepped:Connect(function()
         if not Move.fly then return end
         local c = Net.Player.Character
         local r = c and c:FindFirstChild("HumanoidRootPart")
@@ -114,7 +122,7 @@ function Move.set_fly(state)
         if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir -= Vector3.yAxis end
         flyBody.Velocity = dir.Magnitude > 0 and dir.Unit * Move.fly_value or Vector3.zero
         flyGyro.CFrame = CFrame.new(Vector3.zero, cam.CFrame.LookVector)
-    end))
+    end)
 end
 
 function Move.fly_supported()
@@ -129,6 +137,7 @@ function Move.reset()
     Move.noclip = false
     Move.fly = false
     clearConns()
+    if flyConn then pcall(function() flyConn:Disconnect() end); flyConn = nil end
     if flyBody then pcall(function() flyBody:Destroy() end); flyBody = nil end
     if flyGyro then pcall(function() flyGyro:Destroy() end); flyGyro = nil end
     Move.apply_speed()

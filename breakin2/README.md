@@ -19,7 +19,7 @@ the two global escapes are on the Safety tab.
 | --- | --- |
 | **Home** | where you are (base / lobby / private), enemy count, resolved remote count, rescan button, panic button |
 | **Training** | Strength/Speed loop through `RainbowWhatStat`, per-stat interval, jitter, stop-at-N-pips, one-shot bursts |
-| **Items** | food via `GiveTool`, weapons and armour via `Vending`, stack x10, heal self, heal everyone |
+| **Items** | 29 objects in four dropdowns, every one reporting whether it actually arrived; stack x10, all weapons at once, survival kit, backpack readout, heals |
 | **NPCs** | Uncle Pete's key, Louise for Detective Beans, feed Twado (reads which food the GUI is asking for), clear the fallen-tree roadblock, teleports |
 | **Combat** | throttled `HitBadguy` loop, damage/hits/range, skip boss, single bursts, client-side freeze |
 | **Move** | WalkSpeed, JumpPower, noclip, BodyVelocity fly — all local, no remotes |
@@ -27,6 +27,30 @@ the two global escapes are on the Safety tab.
 | **Enemies** | `Highlight` per enemy plus a distance/HP list |
 | **Roles** | free kid roles (`OutsideRole`) in the lobby only, role pads |
 | **Safety** | kill switch, dry-run, remote table, reset counters |
+
+## Items
+
+Two remotes hand out objects, and the split is not "food vs weapons":
+
+| Route | Call | Objects |
+| --- | --- | --- |
+| give | `GiveTool:FireServer(name)` | Apple, Cookie, Chips, Pizza, Lollipop, Bloxy Cola, Expired Bloxy Cola, Bottle, MedKit, Key, GoldKey, Louise, Phone, Book, Ladder, Battery |
+| food | `Vending:FireServer(3, name, "Food", playerName, 1)` | RainbowPizza, RainbowPizzaBox |
+| weapon | `Vending:FireServer(3, name, "Weapons", playerName, 1)` | Crowbar1/2/3, Bat, Wrench, Pitchfork, Hammer, Broom |
+| gold_armor | `Vending:FireServer(3, "Armor2", "Armor", ...)` | the golden armour |
+| auto | give, then food | GoldenApple, GoldPizza — sources disagree, so both are tried |
+
+Every button waits for the tool to appear in the character or backpack and
+reports what happened: `obtenido (give)` or `no llego: give fired, nothing
+arrived`. That check exists because firing a remote is not the same as being
+given the object — the server refuses quietly when the level gate, the
+location or the money is wrong, and a button that claims success teaches
+nothing.
+
+Names were verified against two working scripts, not invented: `GiveTool` wants
+the tool name with no spaces (`BloxyCola`, `GoldenApple`, `MedKit`, `GoldKey`),
+and the drinks are `BloxyCola` / `ExpiredBloxyCola`, not the in-game display
+names.
 
 ## Remote knowledge
 
@@ -54,6 +78,11 @@ clamped, or gets the shot dropped.
   around it.
 - **Loops are cancellable.** `U.loop(name, …)` invalidates the previous token,
   so flipping a toggle twice cannot leave two loops running.
+- **Hand-triggered actions wait their turn.** `Net.fire` drops a call that
+  arrives inside the remote's throttle window, which is right for a loop but
+  wrong for a button. Items, NPC steps and training use `Net.fire_wait`, which
+  sleeps out the remaining gap. The old x10 was losing half its calls to that
+  gate.
 - **Reversible.** Mud and wind are `CanTouch = false`, brightness keeps a
   pristine snapshot of the six Lighting fields it touches, freeze unanchors
   everything on the way out. Nothing deletes a mission object.
@@ -78,8 +107,14 @@ What the script does:
    dropdowns with each option). A callback that errors fails the build.
 3. `luau-analyze --mode=nonstrict` over the bundle; only `Unknown global`
    findings are tolerated, since those are the Roblox and executor API.
-4. Prometheus with `build/prometheus.medium.lua`.
-5. `build/verify.py` produces two runners for the obfuscated chunk — one for
+4. The bundle is split into 4 parts of ~25 KB and each is obfuscated with
+   `build/prometheus.medium.lua`. Prometheus's Cff pass flattens a chunk into
+   one function and LuaJIT caps a function at 65536 constants; the whole bundle
+   in one chunk produced ~70k constants and the obfuscated file would not even
+   parse. Parts stay a third under the limit.
+5. `build/assemble.py` embeds the obfuscated parts into `dist/breakin2.obf.lua`,
+   which is still the single file you publish.
+6. `build/verify.py` produces two runners for that assembled file — one for
    LuaJIT (Lua 5.1, i.e. what executors run) and one for Luau (what Roblox
    runs) — and both must print `VERIFY OK`.
 
@@ -94,3 +129,24 @@ the verify step is part of the build rather than an afterthought.
 
 Obfuscation is not the same as undetectable: this is an external menu, and the
 server still sees every remote that the toggles fire.
+
+## Bugs this build caught
+
+Recorded because each one was silent in game, and each is now covered by the
+gate:
+
+- items never arrived: the tool name was sent with the display spelling, and
+  the vending route was only used for weapons;
+- x10 fired ten times and delivered about five — call spacing equalled the
+  throttle window, so half were rejected;
+- `Items.equip` reparented a tool that did not exist yet, because `await`'s
+  return value was discarded;
+- noclip and fly added a new connection on every enable, so on/off/on left two
+  loops fighting over the character;
+- "skip boss" matched the model's name against `Boss`, which never matched:
+  boss minions live in a folder called `BadGuysBoss` and the brutes arrive as
+  `BadGuyBrute`;
+- the role pad button touched every unnamed `Part` in the workspace, hazards
+  included;
+- the enemy highlight only ever parented to `CoreGui`, which most executors
+  protect.

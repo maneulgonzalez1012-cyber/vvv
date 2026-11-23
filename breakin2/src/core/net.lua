@@ -103,12 +103,18 @@ local GAP = {
     RainbowWhatStat = 0.10,
     HitBadguy = 0.05,
     Energy = 0.20,
-    GiveTool = 0.15,
-    Vending = 0.15,
+    GiveTool = 0.12,
+    Vending = 0.12,
     HealTheNoobs = 0.50,
     RoadMissionEvent = 0.15,
 }
 local GAP_DEFAULT = 0.10
+
+-- Exposed so callers can space their own loops against the same numbers instead
+-- of guessing and having every other call quietly rejected as "throttled".
+function Net.gap_of(name)
+    return GAP[name] or GAP_DEFAULT
+end
 
 function Net.canFire(name)
     local gap = GAP[name] or GAP_DEFAULT
@@ -145,6 +151,30 @@ function Net.fire(name, ...)
         return false, tostring(err)
     end
     return true
+end
+
+-- Waiting variant for things the player asked for by hand (an item button, a
+-- quest step). Dropping the call would look like a broken button, so it waits
+-- out the gap instead - bounded, so a wedged clock cannot hang the menu.
+function Net.wait_gap(name, limit)
+    local gap = Net.gap_of(name)
+    local now = os.clock or tick
+    local deadline = now() + (limit or gap + 0.5)
+    while true do
+        local last = lastFired[name]
+        if not last or (now() - last) >= gap then return true end
+        if now() >= deadline then return false end
+        task.wait(0.02)
+    end
+end
+
+function Net.fire_wait(name, ...)
+    if not Net.enabled then return false, "disabled" end
+    local remote = Net.get(name)
+    if not remote then return false, "missing" end
+    if Net.dryRun then U.log("dry-run fire", name); return false, "dry-run" end
+    if not Net.wait_gap(name) then return false, "throttled" end
+    return Net.fire(name, ...)
 end
 
 function Net.invoke(name, ...)

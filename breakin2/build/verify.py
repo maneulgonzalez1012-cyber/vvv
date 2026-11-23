@@ -63,14 +63,16 @@ def runner(target, interpreter):
 
 
 def main():
-    target = DIST / "breakin2.obf.lua"
+    # an explicit path lets a candidate build be checked before it is promoted
+    target = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else DIST / "breakin2.obf.lua"
     if not target.exists():
         print("missing", target)
         return 1
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "verify_luajit.lua").write_text(runner(target, "luajit"), encoding="utf-8")
-    (OUT / "verify_luau.luau").write_text(runner(target, "luau"), encoding="utf-8")
-    print("wrote build/out/verify_luajit.lua and build/out/verify_luau.luau")
+    stem = "" if len(sys.argv) <= 1 else "_" + target.stem
+    (OUT / ("verify_luajit%s.lua" % stem)).write_text(runner(target, "luajit"), encoding="utf-8")
+    (OUT / ("verify_luau%s.luau" % stem)).write_text(runner(target, "luau"), encoding="utf-8")
+    print("wrote build/out/verify_luajit%s.lua and build/out/verify_luau%s.luau" % (stem, stem))
     return 0
 
 

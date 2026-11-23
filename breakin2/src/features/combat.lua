@@ -25,6 +25,18 @@ Combat.anchor = false      -- freeze enemies in place, own client only
 
 local hitsSent = 0
 
+-- Boss minions live in BadGuysBoss and the brutes arrive as their own model at
+-- the workspace root; matching the name against "Boss" missed both, so the
+-- "skip boss" switch did nothing. Match the folder they came from too.
+local function is_boss(e)
+    if tostring(e.name):lower():find("boss") then return true end
+    if tostring(e.name):find("Brute") then return true end
+    local box = e.inst and e.inst.Parent
+    if box and tostring(box.Name):find("Boss") then return true end
+    return false
+end
+Combat.is_boss = is_boss
+
 function Combat.hit(enemy)
     local target = enemy.inst
     if not target or not target.Parent then return false end
@@ -44,7 +56,7 @@ function Combat.burst(passes)
     local n = 0
     for _ = 1, passes do
         for _, e in ipairs(Game.enemies()) do
-            if not (Combat.skip_boss and e.name:match("Boss")) then
+            if not (Combat.skip_boss and is_boss(e)) then
                 if Combat.hit(e) then n = n + 1 end
             end
         end
@@ -67,7 +79,7 @@ function Combat.start()
         local root = Net.root()
         if not root then return end
         for _, e in ipairs(Game.enemies()) do
-            if not (Combat.skip_boss and e.name:match("Boss")) and in_range(e) then
+            if not (Combat.skip_boss and is_boss(e)) and in_range(e) then
                 Combat.hit(e)
             end
         end

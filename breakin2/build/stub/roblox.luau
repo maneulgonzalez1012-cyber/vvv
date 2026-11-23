@@ -115,6 +115,10 @@ function Instance:WaitForChild(name, timeout)
 end
 
 function Instance:IsA(class) return isA(self, class) end
+function Instance:Activate()
+    self._activated = (self._activated or 0) + 1
+end
+
 function Instance:Destroy()
     self.Parent = nil
     self._destroyed = true
@@ -154,6 +158,8 @@ local function makePlayer()
     p.CharacterRemoving = newSignal()
     local bag = newInstance("Backpack", "Backpack")
     p:AddChild(bag)
+    local gui = newInstance("PlayerGui", "PlayerGui")
+    p:AddChild(gui)
     local char = newInstance("Model", "StubCharacter")
     local hum = newInstance("Humanoid", "Humanoid")
     hum.Health = 100
@@ -192,12 +198,33 @@ local function addRemote(folder, class, name)
     return r
 end
 
-for _, name in ipairs({ "RainbowWhatStat", "HitBadguy", "GiveTool", "Vending",
+for _, name in ipairs({ "RainbowWhatStat", "HitBadguy",
                         "HealTheNoobs", "Energy", "KeyEvent", "LouiseGive",
                         "CatFed", "RoadMissionEvent" }) do
     addRemote(events, "RemoteEvent", name)
 end
 addRemote(remoteEvents, "RemoteEvent", "OutsideRole")
+
+-- GiveTool / Vending craft the tool the way the server does, so the item flows
+-- can be tested for "did the object arrive" instead of only "did it not throw".
+local function craftTool(name)
+    local tool = newInstance("Tool", name)
+    tool:AddChild(newInstance("Part", "Handle"))
+    local char = player.Character
+    local target = char or player:FindFirstChild("Backpack")
+    tool.Parent = target
+    return tool
+end
+
+local give = addRemote(events, "RemoteEvent", "GiveTool")
+give.FireServer = function(_, rawName)
+    craftTool(tostring(rawName))
+end
+
+local vending = addRemote(events, "RemoteEvent", "Vending")
+vending.FireServer = function(_, mode, name, category)
+    if mode == 3 or mode == 1 then craftTool(tostring(name)) end
+end
 
 local world = newService("Workspace")
 local cam = newInstance("Camera", "Camera")
@@ -248,6 +275,11 @@ function fireclickdetector(detector) return nil end
 function firetouchinterest(part, other, state) return nil end
 -- the sandboxed interpreter has _G locked, so the stub keeps its own table;
 -- this is what an executor's getgenv() is to the script anyway
+-- os.clock is present in every real client; the gate's scheduler prefers tick
+function tick()
+    return os.clock()
+end
+
 local GENV = {}
 function getgenv() return GENV end
 function getrenv() return GENV end

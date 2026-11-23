@@ -20,9 +20,32 @@ Esp.color = Color3.fromRGB(255, 60, 60)
 
 local highlights = {}
 
+-- CoreGui is protected for most executors; a Highlight there can be refused.
+-- Falling back to the player's own PlayerGui keeps the feature working (a
+-- ScreenGui-less Highlight still draws in 3D) instead of silently doing nothing.
+local function highlight_parent()
+    local ok, core = pcall(function() return game:GetService("CoreGui") end)
+    if ok and core then
+        local fine = pcall(function()
+            local probe = Instance.new("Folder")
+            probe.Parent = core
+            probe:Destroy()
+        end)
+        if fine then return core end
+    end
+    local p = Net.Player or game:GetService("Players").LocalPlayer
+    local pg = p and p:FindFirstChild("PlayerGui")
+    return pg
+end
+
+local parentOnce = nil
+
 local function make_highlight(inst)
     local h = highlights[inst]
     if h and h.Parent then return h end
+    if parentOnce == nil then parentOnce = highlight_parent() end
+    local parent = parentOnce
+    if not parent then return nil end
     local ok, created = pcall(function()
         local hi = Instance.new("Highlight")
         hi.FillColor = Esp.color
@@ -31,7 +54,7 @@ local function make_highlight(inst)
         hi.OutlineTransparency = 0
         hi.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
         hi.Adornee = inst
-        hi.Parent = game:GetService("CoreGui")
+        hi.Parent = parent
         return hi
     end)
     if ok then
