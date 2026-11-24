@@ -22,9 +22,10 @@ local CFG = {
     owner = "maneulgonzalez1012-cyber",
     repo = "vvv",
     branch = "arena/6922546f-vvv",
-    -- Freeze point: commit that introduced aero_roblox.lua. FILL: replace with
-    -- the commit SHA you want to freeze (git rev-parse HEAD), then usePin = true.
-    sha = "1f5a47d75921bc7220b68b3e8ee80eaa8d4de47a",
+    -- Freeze point. FILL: replace with `git rev-parse HEAD` of the commit you
+    -- want to freeze, then usePin = true. No puede ser el SHA de este propio
+    -- commit (autoreferente): elige uno ya subido.
+    sha = "5bb615475686e477fd79f6c80a0ceb9eec07dda3",
     file = "aero_roblox.lua",
     usePin = false,        -- false = sigue la rama; true = versión congelada
     cacheBust = true,      -- ?t=... porque noCache no es fiable en todos los executors
