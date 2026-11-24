@@ -1,10 +1,12 @@
--- Aero / Roblox -- loadstring DE URL. Pega esta unica linea en el executor.
--- Trae loader.lua desde la rama; loader.lua trae aero_roblox.lua y lo ejecuta.
-loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/6922546f-vvv/loader.lua", true))()
+-- Aero / Roblox -- EL CORTO: loadstring de una sola linea con link acortado.
+-- Pega esta unica linea en el executor.
+loadstring(game:HttpGet("https://is.gd/aerovvv", true))()
 
--- Para congelar la version no cambies esta linea: en loader.lua pon usePin = true
--- y CFG.sha = el SHA de `git rev-parse HEAD`. El SHA de este propio commit no
--- puede ir aqui (seria autoreferente), por eso el pin vive en el stage 2.
-
--- Directo al payload, sin la estructura de loader.lua (sin reintentos ni validacion):
+-- Destino: https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/6922546f-vvv/aero_roblox.lua
+-- Otros cortos verificados (redireccion 3xx limpia, sin HTML de por medio):
+--   https://tinyurl.com/aero-vvv   mismo payload, alias legible
+--   https://is.gd/aeropin          payload congelado en el SHA 5bb6154
+--   https://is.gd/aeroldr          loader.lua (reintentos + validacion)
+--   https://is.gd/wmQUvu           payload, alias aleatorio de respaldo
+-- Si el acortador cae, la URL cruda:
 -- loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/6922546f-vvv/aero_roblox.lua", true))()
