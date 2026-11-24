@@ -3,93 +3,134 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Aero :: Milonarie Tycoon</title>
+<title>VANTA :: Milonarie Tycoon</title>
 <style>
   :root {
-    --bg: #0f0f13;
-    --panel: #191921;
-    --line: #26262f;
-    --accent: #5096ff;
-    --accent2: #2656a5;
-    --text: #e4e4eb;
-    --muted: #8a8a9b;
+    --bg: #0c0b0a;
+    --panel: #15140f;
+    --line: #2a2823;
+    --text: #f2efe9;
+    --muted: #a09b91;
+    --accent: #f2efe9;
+    --ok: #3ddc84;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0;
     min-height: 100vh;
-    background: radial-gradient(1200px 600px at 50% -10%, #1b2334 0%, var(--bg) 60%);
+    background: radial-gradient(1000px 520px at 50% -10%, #1d1a14 0%, var(--bg) 62%);
     color: var(--text);
-    font: 15px/1.55 "Segoe UI", system-ui, -apple-system, sans-serif;
+    font: 15px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
     display: flex;
-    align-items: center;
     justify-content: center;
-    padding: 32px 16px;
+    padding: 40px 16px;
   }
-  .wrap { width: 100%; max-width: 760px; }
-  header { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: #3ddc84; box-shadow: 0 0 12px #3ddc84; }
-  h1 { font-size: 22px; margin: 0; letter-spacing: .3px; }
-  .sub { color: var(--muted); margin: 0 0 22px 22px; font-size: 13px; }
+  .wrap { width: 100%; max-width: 780px; }
+  .brand { display: flex; align-items: baseline; gap: 12px; }
+  .brand h1 { font-size: 26px; margin: 0; letter-spacing: 4px; font-weight: 700; }
+  .brand span { color: var(--muted); font-size: 13px; letter-spacing: 1px; text-transform: uppercase; }
+  .lead { color: var(--muted); margin: 10px 0 26px; font-size: 14px; }
   .card {
     background: var(--panel);
     border: 1px solid var(--line);
     border-radius: 12px;
-    padding: 18px 18px 20px;
+    padding: 20px;
+    margin-bottom: 16px;
   }
-  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-  .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin: 18px 0 22px; }
-  .feat { background: #14141b; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
-  .feat b { display: block; font-size: 13px; margin-bottom: 2px; }
-  .feat span { color: var(--muted); font-size: 12px; }
+  .card h2 { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
   pre {
-    background: #0c0c11;
+    background: #080807;
     border: 1px solid var(--line);
     border-radius: 10px;
     padding: 14px;
     overflow-x: auto;
-    font: 12.5px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace;
+    font: 12.5px/1.55 ui-monospace, "Cascadia Code", Consolas, monospace;
     color: #cfd6e4;
-    margin: 0 0 14px;
+    margin: 0 0 12px;
+    white-space: pre-wrap;
+    word-break: break-all;
   }
   button {
-    background: var(--accent2);
+    background: #23221d;
     color: var(--text);
-    border: 1px solid var(--accent);
+    border: 1px solid #3a3830;
     border-radius: 8px;
     padding: 9px 16px;
     font: 600 13px "Segoe UI", system-ui, sans-serif;
     cursor: pointer;
   }
-  button:hover { background: var(--accent); }
-  .ok { color: #3ddc84; font-size: 13px; }
-  footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
+  button:hover { background: #33312a; border-color: #6a675c; }
+  .ok { color: var(--ok); font-size: 13px; }
+  .muted { color: var(--muted); font-size: 12.5px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
+  td code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13.5px; }
+  ul b { color: var(--text); font-weight: 600; }
   code { font-family: ui-monospace, Consolas, monospace; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <header>
-    <span class="dot"></span>
-    <h1>Aero :: Milonaire Tycoon</h1>
-  </header>
-  <p class="sub">autofarm, remotes y menu &mdash; payload ofuscado con Prometheus</p>
+  <div class="brand">
+    <h1>VANTA</h1>
+    <span>Milonarie Tycoon</span>
+  </div>
+  <p class="lead">Autofarm, remotes, menu y movimiento. Payload ofuscado con Prometheus.</p>
 
   <div class="card">
-    <div class="features">
-      <div class="feat"><b>Autofarm</b><span>remote / fisico / hybrid</span></div>
-      <div class="feat"><b>Remotes</b><span>spy + replay de argumentos</span></div>
-      <div class="feat"><b>Menu</b><span>FARM / MOVE / TARGET / CONFIG</span></div>
-      <div class="feat"><b>Movimiento</b><span>speed, fly, noclip, inf jump</span></div>
+    <h2>Linea de paste</h2>
+    <div class="row">
+      <b>Pega en el executor con el juego abierto</b>
+      <button id="copy-paste">Copiar</button>
     </div>
+<pre id="paste">loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/5e9deb5f-vvv/loader.lua"))()</pre>
+    <span class="ok" id="status-paste"></span>
+  </div>
 
-    <div class="row" style="margin-bottom:10px">
-      <b>Loader</b>
-      <button id="copy">Copiar</button>
+  <div class="card">
+    <h2>Como funciona</h2>
+    <ul>
+      <li><b>Loader</b>: pantalla de carga -&gt; baja el payload ofuscado -&gt; lo ejecuta.</li>
+      <li><b>Spy</b>: captura la forma real de los argumentos que el juego manda por los remotes.</li>
+      <li><b>Replay</b>: el autofarm reproduce esos argumentos; si no, cobra por via fisica (prompts y partes de dinero).</li>
+      <li><b>Menu</b>: FARM / MOVE / TARGET / CONFIG. Se abre con <b>RightShift</b>.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Funciones</h2>
+    <ul>
+      <li><b>Autofarm</b> por remote o fisico, con auto buy y auto rebirth</li>
+      <li><b>Inflate de cantidad</b>: reescribe el argumento numerico del remote ligado</li>
+      <li><b>Velocidad, fly, noclip, infinite jump</b> y anti-AFK</li>
+      <li><b>Teleport</b> a tu tycoon y al dinero</li>
+      <li><b>Diagnostico de remotes</b> con binding manual (C / B / R) en la tab TARGET</li>
+      <li><b>Config</b> en JSON, guardado y cargado desde la tab CONFIG</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Variantes del payload</h2>
+    <table>
+      <tr><th>Fichero</th><th>Preset</th><th>Tamano</th></tr>
+      <tr><td><code>milonarie_tycoon_obfuscated_light.lua</code></td><td>Medium sin Vmify</td><td>675 KB</td></tr>
+      <tr><td><code>milonarie_tycoon_obfuscated.lua</code></td><td>Medium (register VM)</td><td>4.2 MB</td></tr>
+      <tr><td><code>milonarie_tycoon_obfuscated_strong.lua</code></td><td>Strong</td><td>4.5 MB</td></tr>
+    </table>
+    <p class="muted" style="margin-bottom:0">Para cambiar de variante, edita <code>PAYLOAD_URL</code> en el loader.</p>
+  </div>
+
+  <div class="card">
+    <h2>loader.lua (aloja esto en tu repo)</h2>
+    <div class="row">
+      <b>El fichero que descarga la linea de paste</b>
+      <button id="copy-loader">Copiar</button>
     </div>
-
-<pre id="loader">-- Aero loader :: Milonaire Tycoon
-local PAYLOAD_URL = "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/5e9deb5f-vvv/roblox/milonarie_tycoon/release/milonarie_tycoon_obfuscated.lua"
+<pre id="loader">-- VANTA | MILONARIE TYCOON :: loader
+local PAYLOAD_URL = "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/5e9deb5f-vvv/roblox/milonarie_tycoon/release/milonarie_tycoon_obfuscated_light.lua"
 
 local function fetch(url)
 	if type(request) == "function" then
@@ -106,40 +147,39 @@ local function fetch(url)
 end
 
 local source = fetch(PAYLOAD_URL)
-if not source then error("[Aero] no se pudo descargar el payload") end
+if not source then error("[VANTA] no se pudo descargar el payload") end
 
 local chunk, err
 if type(loadstring) == "function" then chunk, err = loadstring(source) end
 if not chunk and type(load) == "function" then chunk, err = load(source) end
-if not chunk then error("[Aero] el payload no compila: " .. tostring(err)) end
+if not chunk then error("[VANTA] el payload no compila: " .. tostring(err)) end
 
 chunk()</pre>
-
-    <div class="row">
-      <span class="ok" id="status">1. copia el loader &nbsp;2. abre el juego &nbsp;3. pegalo en el executor</span>
-      <span class="sub">RightShift abre el menu</span>
-    </div>
+    <span class="ok" id="status-loader"></span>
   </div>
 
-  <footer>Uso interno. Si cambias el hosting, actualiza <code>PAYLOAD_URL</code> en el loader y en esta pagina.</footer>
+  <p class="muted">El loader prueba <code>request</code>/<code>http_request</code> del executor antes que <code>game:HttpGet</code>, porque en Roblox el HttpGet solo acepta dominios en la allowlist del juego.</p>
 </div>
 
 <script>
-  document.getElementById("copy").addEventListener("click", async function () {
-    var text = document.getElementById("loader").innerText;
-    try {
-      await navigator.clipboard.writeText(text);
-      document.getElementById("status").textContent = "copiado al clipboard";
-    } catch (e) {
-      var area = document.createElement("textarea");
-      area.value = text;
-      document.body.appendChild(area);
-      area.select();
-      document.execCommand("copy");
-      document.body.removeChild(area);
-      document.getElementById("status").textContent = "copiado al clipboard";
-    }
-  });
+  function wire(buttonId, blockId, statusId) {
+    document.getElementById(buttonId).addEventListener("click", async function () {
+      var text = document.getElementById(blockId).innerText;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (e) {
+        var area = document.createElement("textarea");
+        area.value = text;
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand("copy");
+        document.body.removeChild(area);
+      }
+      document.getElementById(statusId).textContent = "copiado al clipboard";
+    });
+  }
+  wire("copy-paste", "paste", "status-paste");
+  wire("copy-loader", "loader", "status-loader");
 </script>
 </body>
 </html>

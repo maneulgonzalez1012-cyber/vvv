@@ -44,6 +44,9 @@ local function eventObj(events, name)
 		function e:Disconnect()
 			self.handlers = {}
 		end
+		function e:Wait()
+			return nil
+		end
 		events[name] = e
 	end
 	return e
@@ -227,6 +230,8 @@ Enum = {
 	ScrollingDirection = { Y = 1, X = 2 },
 	ZIndexBehavior = { Sibling = 0 },
 	Material = { Air = 0 },
+	EasingStyle = { Linear = 1, Quad = 2, Sine = 3 },
+	EasingDirection = { In = 1, Out = 2, InOut = 3 },
 }
 
 Instance = {
@@ -237,6 +242,11 @@ Instance = {
 
 tick = function()
 	return os.time()
+end
+
+-- Roblox expone loadstring (deprecated pero presente); Lua 5.2+ lo elimino.
+if not loadstring then
+	loadstring = load
 end
 
 getgenv = function()
@@ -319,6 +329,25 @@ local RunService = service("RunService")
 local UIS = service("UserInputService")
 UIS.IsKeyDown = function(_, key)
 	return false
+end
+
+TweenInfo = {
+	new = function(duration, easingStyle, easingDirection)
+		return { Duration = duration, EasingStyle = easingStyle, EasingDirection = easingDirection }
+	end,
+}
+
+local TweenService = service("TweenService")
+TweenService.Create = function(_, instance, info, props)
+	local tween = {
+		Instance = instance,
+		Info = info,
+		Properties = props,
+		Play = function() return nil end,
+		Cancel = function() return nil end,
+		Completed = eventObj({}, "Completed"),
+	}
+	return tween
 end
 
 local VirtualUser = service("VirtualUser")

@@ -16,6 +16,18 @@ argumentos que el juego manda, y los reproduce**.
    dinero, el modo `physical` camina al objetivo y/o dispara el prompt
    (`fireproximityprompt` -> `fireclickdetector` -> caminar encima).
 
+## Loader (linea de paste)
+
+El loader vive en la raiz del repo (`/loader.lua`), con pantalla de carga al estilo VANTA:
+
+```lua
+loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/5e9deb5f-vvv/loader.lua"))()
+```
+
+Baja el payload ofuscado de `release/` y lo ejecuta. Variantes: `milonarie_tycoon_obfuscated_light.lua`
+(675 KB, la que usa el loader), `milonarie_tycoon_obfuscated.lua` (Medium, 4.2 MB),
+`milonarie_tycoon_obfuscated_strong.lua` (Strong, 4.5 MB).
+
 ## Uso
 
 1. Abre el juego, entra a un server.
