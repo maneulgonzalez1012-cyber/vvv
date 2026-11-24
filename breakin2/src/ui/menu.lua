@@ -48,6 +48,10 @@ function Menu.build()
     local home = window:CreateTab({ name = "Home" })
 
     home:CreateSection({ name = "estado" })
+    home:CreateText({
+        name = "version",
+        text = "build " .. tostring(U.VERSION),
+    })
     local placeLine = home:CreateText({ name = "lugar", text = Game.where() })
     local enemyStat = home:CreateStat({ name = "enemigos", value = 0 })
     local remoteStat = home:CreateStat({ name = "remotes", value = 0 })
@@ -340,6 +344,19 @@ function Menu.build()
             window:Notify({ title = ok and ("+" .. Shield.amount) or "no subio", content = tostring(why) })
         end,
     })
+    itemsTab:CreateButton({
+        name = "por que no sube (diagnostico)",
+        description = "prueba las formas conocidas y dice cual movio la barra",
+        callback = function()
+            window:Notify({ title = "probando Energy", content = "5 formas, ~3 s", duration = 3 })
+            local report = Shield.diagnose()
+            U.log("energy diagnose\n" .. tostring(report))
+            window:Notify({ title = "resultado", content = tostring(report), duration = 12 })
+            local hp = Shield.health()
+            hpLine:Set(hp and string.format("%.0f", hp) or "?")
+        end,
+    })
+
     itemsTab:CreateButton({
         name = "llenar la barra",
         description = "lee el maximo y suma esa diferencia",

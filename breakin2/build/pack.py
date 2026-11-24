@@ -252,6 +252,15 @@ if okItems and Items.check_catalog then
             print("ENERGY FAIL: no humanoid")
         end
 
+        -- the diagnostic must not throw, whatever the server does
+        local diagOk, diag = pcall(Shield.diagnose)
+        if diagOk then
+            print("diagnose ok: " .. tostring(diag):gsub("\n", " | "))
+        else
+            failures += 1
+            print("DIAGNOSE FAIL: " .. tostring(diag))
+        end
+
         -- Twado: read the want, feed it
         local Pet = require("features/pet")
         local wants = Pet.wants()

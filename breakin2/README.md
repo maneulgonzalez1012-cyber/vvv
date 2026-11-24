@@ -4,11 +4,14 @@ A Rayfield **Gen2** menu for *Break In 2* (Cracky4), built from small modules,
 tested without a game client, and shipped obfuscated with Prometheus.
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/3fa3ee03-vvv/breakin2/dist/breakin2.obf.lua"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/3fa3ee03-vvv/breakin2/dist/breakin2_v2.obf.lua"))()
 ```
 
-The published file is `dist/breakin2.obf.lua`; the readable bundle it is built
-from is `dist/breakin2.lua`.
+The published file is `dist/breakin2_v2.obf.lua`; the readable bundle it is
+built from is `dist/breakin2.lua`. The filename changes between releases on
+purpose — a cached old file at the same URL is indistinguishable from a fix
+that did not work. The **Home** tab prints the build id; if it does not say
+`2026.11.23-c`, you are still running an old chunk.
 
 ## What it does
 
@@ -80,14 +83,19 @@ the working scripts show is that the heal is not the food:
 
 | Call | Effect |
 | --- | --- |
-| `Energy:FireServer(25, "Pizza")` | +25, no pizza needed — the name is a label the server echoes |
-| `Energy:FireServer(999999)` | accepted with a single argument |
+| `Energy:FireServer(25, "Pizza")` | the shape every BI2 script uses, +25 |
+| `Energy:FireServer(75, "GoldPizza")` / `(999, "GoldenApple")` | the bigger tiers |
+| `Energy:FireServer(999999)` | **this one is from Break In 1**, where the remote lives in `ReplicatedStorage.RemoteEvents` — not evidence for BI2 |
 | `Energy:FireServer(-amount, false, false)` | **subtracts** — this is how damage is applied |
 
-So *+25 (sin comer nada)* is one button: send the amount, then look at the
-Humanoid, because the client mirrors server health. If the number went up, the
-call landed; whichever argument shape worked is cached (`amount+food` →
-`amount` → `amount+false`). There is also *sumar esa cantidad* (5–200) and
+An earlier build assumed the bare-amount shape worked in BI2 because a search
+result showed one. It does not follow: that script also calls `HealPlayer` and
+`Energy("Cat")`, neither of which exists in BI2. So the heal is now sent the way
+BI2's own scripts send it — amount **and** the matching food name — and then the
+Humanoid is read, because the client mirrors server health. The shape that moved
+the bar is cached; if none does, **por qué no sube (diagnóstico)** sweeps five
+shapes and prints what each one did, so the answer comes from the game instead of
+from a guess. There is also *sumar esa cantidad* (5–200) and
 *llenar la barra*, which reads `MaxHealth` and sends the missing difference once.
 
 **Semi godmode** is a second mechanism, and it is the one the public scripts

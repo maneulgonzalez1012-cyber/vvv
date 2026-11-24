@@ -82,7 +82,7 @@ def main():
     out.append('require("main")\n')
 
     result = "".join(out)
-    target = DIST / "breakin2.obf.lua"
+    target = DIST / "breakin2_v2.obf.lua"
     target.write_text(result, encoding="utf-8")
     print("assembled %s  parts=%d  %d bytes  sha256=%s"
           % (target, len(files), len(result),

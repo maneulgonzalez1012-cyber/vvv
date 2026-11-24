@@ -61,7 +61,7 @@ python3 build/verify.py
 step "summary"
 python3 - <<'PY'
 import hashlib
-for name in ("dist/breakin2.lua", "dist/breakin2.obf.lua"):
+for name in ("dist/breakin2.lua", "dist/breakin2_v2.obf.lua"):
     data = open(name, "rb").read()
     print("%-24s %8d bytes  sha256=%s" % (
         name, len(data), hashlib.sha256(data).hexdigest()[:32]))

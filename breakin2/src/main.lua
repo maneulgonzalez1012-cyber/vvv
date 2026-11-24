@@ -34,7 +34,7 @@ local remotes = Net.resolve()
 
 local window = Menu.build()
 
-U.notify("breaker cargado",
+U.notify("breaker " .. U.VERSION .. " cargado",
     string.format("%s | %d remotes | %d ausentes",
         Game.where(), U.count(remotes), #Net.missing))
 

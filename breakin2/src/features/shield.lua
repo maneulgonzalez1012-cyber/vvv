@@ -3,15 +3,18 @@
 --
 -- What the game actually does, from the scripts that work against it:
 --
---   Events.Energy:FireServer(25, "Pizza")     -- +25, no pizza required
---   Events.Energy:FireServer(999999)          -- one argument alone is accepted
+--   Events.Energy:FireServer(25, "Pizza")            -- the one BI2 scripts use
 --   Events.Energy:FireServer(-amount, false, false)  -- negative SUBTRACTS
 --
--- So the heal is not the food: the food name is a label the server echoes back.
--- Giving a Pizza first was theatre. Here the amount is sent on its own and the
--- result is *checked*: the local Humanoid mirrors server health, so if the
--- number actually went up, the call landed. Whichever argument shape worked is
--- cached, the same way the weapon route is.
+-- A bare FireServer(999999) does exist, but it is from Break In 1, where the
+-- remote lives in ReplicatedStorage.RemoteEvents; that script's other calls
+-- (HealPlayer, "Cat") do not exist in BI2. So it is not evidence that BI2
+-- accepts an amount on its own, and assuming it was is why the button did
+-- nothing. The honest approach is to send the heal the way BI2's own scripts
+-- do, and to *check the humanoid*: the client mirrors server health, so either
+-- the number went up or the call was ignored. Every shape is tried and the one
+-- that moved the bar is cached - and the amount we send is the amount that
+-- worked, not a made-up big number.
 --
 -- Semi-godmode is a different mechanism. In Break In 2 the boss attacks apply
 -- their damage *through this same remote* with a negative amount, so hooking
@@ -39,8 +42,20 @@ function Shield.health()
     return hum.Health, hum.MaxHealth
 end
 
+-- The food name is what the BI2 scripts pass; "Pizza" heals 25, "GoldPizza" 75,
+-- "GoldenApple" 999. The name and the amount travel together so the server
+-- sees a request it recognises, which is the difference between a heal and a
+-- silently dropped call.
+local function food_for(amount)
+    if amount >= 500 then return "GoldenApple" end
+    if amount >= 60 then return "GoldPizza" end
+    return "Pizza"
+end
+Shield.food_for = food_for
+
 local ENTRY_POINTS = {
-    { label = "amount+food", args = function(amount) return amount, "Pizza" end },
+    { label = "amount+food", args = function(amount) return amount, food_for(amount) end },
+    { label = "food+amount", args = function(amount) return food_for(amount), amount end },
     { label = "amount", args = function(amount) return amount end },
     { label = "amount+false", args = function(amount) return amount, false, false end },
 }
@@ -92,6 +107,40 @@ end
 -- Instance heal, the button the user actually wants: +25 without touching food.
 function Shield.top_up(amount)
     return Shield.add_energy(amount or Shield.amount, 1.2)
+end
+
+-- When nothing works, this says why in terms the player can act on: it sweeps
+-- the argument shapes and a couple of values, records what moved the bar, and
+-- leaves the working combination cached. Called from the "por que no sube"
+-- button.
+function Shield.diagnose()
+    local report = {}
+    local hp0 = Shield.health()
+    if not hp0 then return "sin personaje" end
+
+    local tries = {
+        { "25 Pizza", function() return 25, "Pizza" end },
+        { "75 GoldPizza", function() return 75, "GoldPizza" end },
+        { "999 GoldenApple", function() return 999, "GoldenApple" end },
+        { "999999 solo", function() return 999999 end },
+        { "25 solo", function() return 25 end },
+    }
+
+    for _, entry in ipairs(tries) do
+        local before = Shield.health()
+        local fired = Net.fire_wait("Energy", entry[2]())
+        task.wait(0.35)
+        local after = Shield.health()
+        local moved = (before and after) and (after - before) or 0
+        table.insert(report, string.format("%s -> %s (%+.0f)", entry[1],
+            fired and "enviado" or "no enviado", moved))
+    end
+
+    local hp1 = Shield.health()
+    if hp1 and hp0 and hp1 > hp0 then
+        return table.concat(report, "\n") .. "\nalguna forma funciona"
+    end
+    return table.concat(report, "\n") .. "\nninguna forma movio la barra"
 end
 
 -- ── hook ────────────────────────────────────────────────────────────────────
