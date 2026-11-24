@@ -23,6 +23,7 @@ local World = require("features/world")
 local Esp = require("features/esp")
 local Roles = require("features/roles")
 local Pet = require("features/pet")
+local Shield = require("features/shield")
 
 local Menu = {}
 
@@ -307,19 +308,69 @@ function Menu.build()
         end,
     })
 
-    itemsTab:CreateSection({ name = "semi godmode (Energy)" })
+    itemsTab:CreateSection({ name = "vida (Energy)" })
+    local hpLine = itemsTab:CreateText({ name = "hp", text = "sin personaje" })
+
+    itemsTab:CreateButton({
+        name = "+25 de vida (sin comer nada)",
+        description = "Energy:FireServer(25) y comprueba que subio",
+        callback = function()
+            local ok, why, hp = Shield.top_up(25)
+            hpLine:Set(string.format("hp %s", tostring(hp)))
+            window:Notify({
+                title = ok and "+25" or "no subio",
+                content = ok and ("via " .. tostring(why)) or tostring(why),
+            })
+        end,
+    })
+
+    itemsTab:CreateSlider({
+        name = "cantidad a sumar",
+        flag = "energy_amount",
+        range = { 5, 200 },
+        increment = 5,
+        value = 25,
+        callback = function(v) Shield.amount = v end,
+    })
+    itemsTab:CreateButton({
+        name = "sumar esa cantidad",
+        callback = function()
+            local ok, why, hp = Shield.add_energy(Shield.amount, 1.2)
+            hpLine:Set(string.format("hp %s", tostring(hp)))
+            window:Notify({ title = ok and ("+" .. Shield.amount) or "no subio", content = tostring(why) })
+        end,
+    })
+    itemsTab:CreateButton({
+        name = "llenar la barra",
+        description = "lee el maximo y suma esa diferencia",
+        callback = function()
+            local hp, max = Shield.health()
+            if not hp or not max then return end
+            local missing = math.ceil(max - hp)
+            if missing <= 0 then
+                window:Notify({ title = "vida", content = "ya esta llena" })
+                return
+            end
+            local ok, why, after = Shield.add_energy(missing, 1.5)
+            hpLine:Set(string.format("hp %s", tostring(after)))
+            window:Notify({ title = ok and "barra llena" or "no subio", content = tostring(why) })
+        end,
+    })
+
+    itemsTab:CreateSection({ name = "semi godmode" })
     itemsTab:CreateText({
-        name = "como funciona",
-        text = "Energy es la barra de vida (200, 0 = muerte). Esto manda Energy cuando " ..
-               "bajas del piso que elijas. No es invulnerabilidad: es un colchon.",
+        name = "que hace",
+        text = "anula los Energy negativos con los que los bosses hacen dano (hook de __namecall) " ..
+               "y ademas mantiene el piso de vida. Los golpes de minion los aplica el server, " ..
+               "esos los cubre el top-up.",
     })
     itemsTab:CreateToggle({
         name = "semi godmode",
         flag = "god_on",
         value = false,
-        description = "Energy automatico cuando la vida baja del piso",
+        description = "bloquea dano de boss + energia automatica bajo el piso",
         callback = function(v)
-            if v then Items.god_start() else Items.god_stop() end
+            if v then Shield.god_start() else Shield.god_stop() end
         end,
     })
     itemsTab:CreateSlider({
@@ -328,25 +379,23 @@ function Menu.build()
         range = { 10, 180 },
         increment = 5,
         value = 60,
-        callback = function(v) Items.god.floor = v end,
+        callback = function(v) Shield.god.floor = v end,
     })
-    itemsTab:CreateDropdown({
-        name = "curacion",
-        flag = "god_amount",
-        options = { "25 (pizza)", "75 (golden pizza)", "999 (golden apple)" },
-        value = "25 (pizza)",
-        callback = function(sel)
-            local text = type(sel) == "table" and sel[1] or sel
-            local amount = tonumber(tostring(text):match("^(%d+)")) or 25
-            Items.god.amount = amount
-            Items.god.food = amount >= 900 and "GoldenApple" or (amount >= 70 and "GoldPizza" or "Pizza")
+    local godLine = itemsTab:CreateText({ name = "estado del hook", text = Shield.status() })
+    itemsTab:CreateButton({
+        name = "estado del semi godmode",
+        callback = function()
+            local text = Shield.status()
+            godLine:Set(text)
+            window:Notify({ title = "semi godmode", content = text, duration = 6 })
         end,
     })
     itemsTab:CreateButton({
-        name = "curarme ahora (energy)",
+        name = "quitar el hook",
+        description = "vuelve a dejar que el juego reste vida normalmente",
         callback = function()
-            local ok = Items.energy(Items.god.amount, Items.god.food)
-            window:Notify({ title = "energy", content = ok and "enviado" or "no pude" })
+            Shield.remove()
+            godLine:Set(Shield.status())
         end,
     })
 
@@ -735,6 +784,11 @@ function Menu.build()
         pcall(function() espLine:Set(line) end)
         if Esp.enabled then Esp.apply(list) end
         pcall(function() petLine:Set(Pet.summary()) end)
+        pcall(function()
+            local hp, max = Shield.health()
+            hpLine:Set(hp and string.format("%.0f / %.0f", hp, max) or "sin personaje")
+            godLine:Set(Shield.status())
+        end)
     end)
 
     return window

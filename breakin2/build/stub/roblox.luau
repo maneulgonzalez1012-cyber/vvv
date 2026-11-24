@@ -210,6 +210,16 @@ for _, name in ipairs({ "RainbowWhatStat", "HitBadguy",
 end
 addRemote(remoteEvents, "RemoteEvent", "OutsideRole")
 
+-- Energy: the server adds (or subtracts) health by the amount it is given. That
+-- is exactly the behaviour the heal relies on, so the stub must mirror it.
+local energy = events:FindFirstChild("Energy")
+energy.FireServer = function(_, amount)
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum or type(amount) ~= "number" then return end
+    hum.Health = math.clamp(hum.Health + amount, 0, hum.MaxHealth)
+end
+
 -- GiveTool / Vending craft the tool the way the server does, so the item flows
 -- can be tested for "did the object arrive" instead of only "did it not throw".
 local function craftTool(name)

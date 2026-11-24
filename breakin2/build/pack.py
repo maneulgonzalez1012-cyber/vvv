@@ -217,25 +217,39 @@ if okItems and Items.check_catalog then
             #weaponIds - weaponFails, #weaponIds, tostring(Items.weapon_variant)))
         failures += weaponFails
 
-        -- semi godmode: no heal above the floor, one heal below it
-        local hum = Net.humanoid()
-        if hum then
-            hum.Health = hum.MaxHealth
-            -- the menu callbacks above ran with 50/17 on every slider, so the
-            -- floor is whatever the last callback left it at. Pin it here.
-            Items.god.floor = 60
-            local healedAboveFloor = Items.god_tick()
-            hum.Health = 20
-            Items.god.enabled = true
-            local healedBelowFloor = Items.god_tick()
+        -- energy: +N out of nowhere, no food involved, and it must land
+        local Shield = require("features/shield")
+        local hum2 = Net.humanoid()
+        if hum2 then
+            hum2.Health = 40
+            local added, how, after = Shield.add_energy(25, 1.5)
+            print(string.format("energy: +25 -> %s (via %s, hp %s, variant %s)",
+                tostring(added), tostring(how), tostring(after),
+                tostring(Shield.energy_variant)))
+            if not added then failures += 1 end
 
-            Items.god.enabled = false
-            print(string.format("god: above-floor=%s below-floor=%s",
-                tostring(healedAboveFloor), tostring(healedBelowFloor)))
-            if healedAboveFloor or not healedBelowFloor then failures += 1 end
+            -- semi godmode decision, tested without a hook
+            if Shield.filter_energy(-30) ~= 0 then
+                failures += 1
+                print("SHIELD FAIL: negative energy not clamped")
+            end
+            if Shield.filter_energy(25) ~= 25 then
+                failures += 1
+                print("SHIELD FAIL: positive energy altered")
+            end
+
+            Shield.god.floor = 60
+            Shield.god.enabled = true
+            hum2.Health = hum2.MaxHealth
+            local godAbove = Shield.god_tick()
+            hum2.Health = 20
+            local godBelow = Shield.god_tick()
+            Shield.god.enabled = false
+            print(string.format("god: above-floor=%s below-floor=%s", tostring(godAbove), tostring(godBelow)))
+            if godAbove or not godBelow then failures += 1 end
         else
             failures += 1
-            print("GOD FAIL: no humanoid")
+            print("ENERGY FAIL: no humanoid")
         end
 
         -- Twado: read the want, feed it

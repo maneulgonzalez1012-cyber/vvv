@@ -1,5 +1,5 @@
 -- breaker / break in 2 - readable bundle
--- built from 15 modules; this file is for reading, dist/breakin2.obf.lua
+-- built from 16 modules; this file is for reading, dist/breakin2.obf.lua
 -- is what ships (same modules, split into parts, obfuscated).
 
 local MODULES = {}
@@ -1137,88 +1137,28 @@ function Items.eat(id)
     return ok
 end
 
--- Energy is the game's health bar: 200 max, 0 is instant death, and every
--- source agrees on the remote shape -
---     Events.Energy:FireServer(amount, foodName)
--- with 25 for a Pizza, 75 for a Golden Pizza and 999 for a Golden Apple
--- (the fandom wiki's numbers, and the same ones the working scripts send).
--- Nobody publishes a cap, so the amount is kept at a value the game itself
--- heals for; a made-up 1e9 is what gets a remote rejected.
+-- Thin delegates: the energy mechanics moved to features/shield.lua, but the
+-- names are kept so older call sites (and saved menus) keep working.
 function Items.energy(amount, food)
-    return Net.fire("Energy", amount, food or "Pizza")
-end
-
-function Items.heal_self()
-    -- the real thing first: eat the food, so the tool's own logic runs
-    if Items.eat("Pizza") then return true end
-    if Items.energy(25, "Pizza") then return true end
-    return false
-end
-
--- Semi-godmode: an Energy call whenever health drops below a floor. "Semi" is
--- literal - it keeps you alive through a wave without pretending to be
--- invulnerable, and it is a third of the refresh rate the spam scripts use
--- (they fire every frame, which is exactly how a remote gets a player kicked).
--- Big heals are spaced; the small top-up only fires when it is needed.
-Items.god = {
-    enabled = false,
-    floor = 60,        -- heal when the humanoid drops under this
-    amount = 25,       -- pizza tier
-    food = "Pizza",
-    interval = 0.6,
-    heals = 0,
-}
-local last_god_heal = nil   -- nil means "never healed yet", not "healed at t=0"
-
-function Items.health()
-    local hum = Net.humanoid()
-    if not hum then return nil end
-    return hum.Health, hum.MaxHealth
+    local Shield = require("features/shield")
+    if food and Shield.energy_variant == 1 then
+        return Net.fire("Energy", amount, food)
+    end
+    return Shield.add_energy(amount, 1.0)
 end
 
 function Items.god_tick()
-    if not Items.god.enabled then return false end
-    local hp = Items.health()
-    if not hp then return false end
-    local now = os.clock or tick
-    if hp > Items.god.floor then return false end
-    if last_god_heal and (now() - last_god_heal) < Items.god.interval then return false end
-    if not Net.fire("Energy", Items.god.amount, Items.god.food) then return false end
-    last_god_heal = now()
-    Items.god.heals = Items.god.heals + 1
-    return true
+    return require("features/shield").god_tick()
 end
 
-function Items.god_start()
-    Items.god.enabled = true
-    U.loop("god", Items.god.interval, function()
-        if not Items.god.enabled then U.stop("god"); return end
-        Items.god_tick()
-    end)
-end
-
-function Items.god_stop()
-    Items.god.enabled = false
-    U.stop("god")
-end
-
--- Heal everyone: the server only trusts players who are actually holding a
--- Golden Apple, so it is given, equipped, then swapped in.
-function Items.heal_all()
-    Items.unequip_all()
-    task.wait(0.15)
-    if not Items.obtain("GoldenApple", 1.0) then
-        return false, "no pude obtener la golden apple"
-    end
-    task.wait(0.2)
-    if not Items.equip("GoldenApple") then
-        return false, "no pude equiparla"
-    end
-    task.wait(0.3)
-    local ok = Net.fire("HealTheNoobs")
-    task.wait(0.3)
-    Items.unequip_all()
-    return ok
+-- Energy lives in features/shield.lua now: the heal does not need a food, so
+-- the food path stays here and the "+25 out of nowhere" path lives there.
+function Items.heal_self()
+    local Shield = require("features/shield")
+    local ok = Shield.add_energy(25, 1.2)
+    if ok then return true end
+    -- last resort: eat something, if the remote path is refused
+    return Items.eat("Pizza")
 end
 
 -- ── Twado ───────────────────────────────────────────────────────────────────
@@ -1787,6 +1727,226 @@ end
 return Roles
 
 end
+MODULES["features/shield"] = function(require)
+-- features/shield.lua
+-- Survival: adding energy out of thin air, and stopping the game from taking it.
+--
+-- What the game actually does, from the scripts that work against it:
+--
+--   Events.Energy:FireServer(25, "Pizza")     -- +25, no pizza required
+--   Events.Energy:FireServer(999999)          -- one argument alone is accepted
+--   Events.Energy:FireServer(-amount, false, false)  -- negative SUBTRACTS
+--
+-- So the heal is not the food: the food name is a label the server echoes back.
+-- Giving a Pizza first was theatre. Here the amount is sent on its own and the
+-- result is *checked*: the local Humanoid mirrors server health, so if the
+-- number actually went up, the call landed. Whichever argument shape worked is
+-- cached, the same way the weapon route is.
+--
+-- Semi-godmode is a different mechanism. In Break In 2 the boss attacks apply
+-- their damage *through this same remote* with a negative amount, so hooking
+-- the namecall and clamping a negative to zero stops them. That is the trick
+-- every public semi-godmode uses. It only works if the executor exposes
+-- hookmetamethod / getrawmetatable, so it is guarded, reported, and backed by a
+-- periodic top-up for the damage that is applied server-side (ordinary enemies),
+-- which a client hook cannot touch.
+
+local Net = require("core/net")
+local U = require("core/util")
+
+local Shield = {}
+
+Shield.amount = 25
+Shield.energy_variant = nil     -- 1 = (amount, food), 2 = (amount), set on first success
+Shield.hooked = false
+Shield.blocked = 0
+
+-- ── energy ──────────────────────────────────────────────────────────────────
+
+function Shield.health()
+    local hum = Net.humanoid()
+    if not hum then return nil, nil end
+    return hum.Health, hum.MaxHealth
+end
+
+local ENTRY_POINTS = {
+    { label = "amount+food", args = function(amount) return amount, "Pizza" end },
+    { label = "amount", args = function(amount) return amount end },
+    { label = "amount+false", args = function(amount) return amount, false, false end },
+}
+
+local function try_fire(index, amount)
+    local entry = ENTRY_POINTS[index]
+    return Net.fire_wait("Energy", entry.args(amount))
+end
+
+-- Send, then look at the humanoid. `+25` is easy to confirm: either Health went
+-- up by it or the call was ignored.
+function Shield.add_energy(amount, timeout)
+    amount = amount or Shield.amount
+    local before = Shield.health()
+    local now = os.clock or tick
+    local deadline = now() + (timeout or 1.0)
+
+    local order = {}
+    if Shield.energy_variant then
+        table.insert(order, Shield.energy_variant)
+    end
+    for i = 1, #ENTRY_POINTS do
+        if i ~= Shield.energy_variant then table.insert(order, i) end
+    end
+
+    for _, index in ipairs(order) do
+        if not try_fire(index, amount) then
+            -- throttled or missing; one retry through fire_wait is enough
+            try_fire(index, amount)
+        end
+        repeat
+            task.wait(0.08)
+            local after = Shield.health()
+            if before and after and after > before + 0.5 then
+                Shield.energy_variant = index
+                return true, ENTRY_POINTS[index].label, after
+            end
+        until now() >= deadline
+        deadline = now() + 0.8
+    end
+
+    local after = Shield.health()
+    if after and before and after > before + 0.5 then
+        return true, "subio solo", after
+    end
+    return false, "el server no sumo nada"
+end
+
+-- Instance heal, the button the user actually wants: +25 without touching food.
+function Shield.top_up(amount)
+    return Shield.add_energy(amount or Shield.amount, 1.2)
+end
+
+-- ── hook ────────────────────────────────────────────────────────────────────
+
+-- The pure decision, split out so it can be tested without a hook.
+function Shield.filter_energy(arg)
+    if type(arg) ~= "number" then return arg end
+    if arg < 0 then return 0 end
+    return arg
+end
+
+function Shield.hook_supported()
+    return type(getrawmetatable) == "function"
+        and type(setreadonly) == "function"
+        and type(getnamecallmethod) == "function"
+        and type(hookmetamethod) == "function"
+end
+
+local original_namecall = nil
+
+function Shield.install()
+    if Shield.hooked then return true end
+    if not Shield.hook_supported() then
+        U.notify("semi godmode", "tu executor no expone hookmetamethod; uso el top-up")
+        return false
+    end
+
+    local ok = pcall(function()
+        local mt = getrawmetatable(game)
+        original_namecall = mt.__namecall
+
+        local function wrapped(self, ...)
+            local method = getnamecallmethod()
+            if method == "FireServer" and self.Name == "Energy" then
+                local args = { ... }
+                if type(args[1]) == "number" and args[1] < 0 then
+                    args[1] = 0
+                    Shield.blocked = Shield.blocked + 1
+                end
+                return original_namecall(self, table.unpack(args))
+            end
+            return original_namecall(self, ...)
+        end
+
+        -- newcclosure keeps the hook out of the game's own introspection where
+        -- the executor provides it; the plain function is a fine fallback.
+        if type(newcclosure) == "function" then wrapped = newcclosure(wrapped) end
+
+        setreadonly(mt, false)
+        mt.__namecall = wrapped
+        setreadonly(mt, true)
+    end)
+
+    if not ok then
+        U.log("semi godmode: hook fallo")
+        return false
+    end
+    Shield.hooked = true
+    return true
+end
+
+function Shield.remove()
+    if not Shield.hooked then return end
+    pcall(function()
+        local mt = getrawmetatable(game)
+        setreadonly(mt, false)
+        mt.__namecall = original_namecall
+        setreadonly(mt, true)
+    end)
+    Shield.hooked = false
+end
+
+-- ── semi godmode ────────────────────────────────────────────────────────────
+
+Shield.god = {
+    enabled = false,
+    floor = 60,
+    interval = 0.6,
+    heals = 0,
+}
+
+local last_heal = nil
+
+function Shield.god_tick()
+    if not Shield.god.enabled then return false end
+    local hp = Shield.health()
+    if not hp then return false end
+    local now = os.clock or tick
+    if hp > Shield.god.floor then return false end
+    if last_heal and (now() - last_heal) < Shield.god.interval then return false end
+    local ok = Shield.add_energy(Shield.amount, 0.5)
+    if ok then
+        last_heal = now()
+        Shield.god.heals = Shield.god.heals + 1
+    end
+    return ok
+end
+
+function Shield.god_start()
+    Shield.god.enabled = true
+    Shield.install()
+    U.loop("god", Shield.god.interval, function()
+        if not Shield.god.enabled then U.stop("god"); return end
+        Shield.god_tick()
+    end)
+end
+
+function Shield.god_stop()
+    Shield.god.enabled = false
+    Shield.remove()
+    U.stop("god")
+end
+
+function Shield.status()
+    if Shield.hooked then
+        return "hook activo | negativos bloqueados: " .. Shield.blocked
+    end
+    local hp = Shield.health()
+    if hp then return string.format("sin hook | hp %.0f", hp) end
+    return "sin personaje"
+end
+
+return Shield
+
+end
 MODULES["features/train"] = function(require)
 -- features/train.lua
 -- Strength and Speed, the two stats every objective is gated behind.
@@ -2119,6 +2279,7 @@ local World = require("features/world")
 local Esp = require("features/esp")
 local Roles = require("features/roles")
 local Pet = require("features/pet")
+local Shield = require("features/shield")
 
 local Menu = {}
 
@@ -2403,19 +2564,69 @@ function Menu.build()
         end,
     })
 
-    itemsTab:CreateSection({ name = "semi godmode (Energy)" })
+    itemsTab:CreateSection({ name = "vida (Energy)" })
+    local hpLine = itemsTab:CreateText({ name = "hp", text = "sin personaje" })
+
+    itemsTab:CreateButton({
+        name = "+25 de vida (sin comer nada)",
+        description = "Energy:FireServer(25) y comprueba que subio",
+        callback = function()
+            local ok, why, hp = Shield.top_up(25)
+            hpLine:Set(string.format("hp %s", tostring(hp)))
+            window:Notify({
+                title = ok and "+25" or "no subio",
+                content = ok and ("via " .. tostring(why)) or tostring(why),
+            })
+        end,
+    })
+
+    itemsTab:CreateSlider({
+        name = "cantidad a sumar",
+        flag = "energy_amount",
+        range = { 5, 200 },
+        increment = 5,
+        value = 25,
+        callback = function(v) Shield.amount = v end,
+    })
+    itemsTab:CreateButton({
+        name = "sumar esa cantidad",
+        callback = function()
+            local ok, why, hp = Shield.add_energy(Shield.amount, 1.2)
+            hpLine:Set(string.format("hp %s", tostring(hp)))
+            window:Notify({ title = ok and ("+" .. Shield.amount) or "no subio", content = tostring(why) })
+        end,
+    })
+    itemsTab:CreateButton({
+        name = "llenar la barra",
+        description = "lee el maximo y suma esa diferencia",
+        callback = function()
+            local hp, max = Shield.health()
+            if not hp or not max then return end
+            local missing = math.ceil(max - hp)
+            if missing <= 0 then
+                window:Notify({ title = "vida", content = "ya esta llena" })
+                return
+            end
+            local ok, why, after = Shield.add_energy(missing, 1.5)
+            hpLine:Set(string.format("hp %s", tostring(after)))
+            window:Notify({ title = ok and "barra llena" or "no subio", content = tostring(why) })
+        end,
+    })
+
+    itemsTab:CreateSection({ name = "semi godmode" })
     itemsTab:CreateText({
-        name = "como funciona",
-        text = "Energy es la barra de vida (200, 0 = muerte). Esto manda Energy cuando " ..
-               "bajas del piso que elijas. No es invulnerabilidad: es un colchon.",
+        name = "que hace",
+        text = "anula los Energy negativos con los que los bosses hacen dano (hook de __namecall) " ..
+               "y ademas mantiene el piso de vida. Los golpes de minion los aplica el server, " ..
+               "esos los cubre el top-up.",
     })
     itemsTab:CreateToggle({
         name = "semi godmode",
         flag = "god_on",
         value = false,
-        description = "Energy automatico cuando la vida baja del piso",
+        description = "bloquea dano de boss + energia automatica bajo el piso",
         callback = function(v)
-            if v then Items.god_start() else Items.god_stop() end
+            if v then Shield.god_start() else Shield.god_stop() end
         end,
     })
     itemsTab:CreateSlider({
@@ -2424,25 +2635,23 @@ function Menu.build()
         range = { 10, 180 },
         increment = 5,
         value = 60,
-        callback = function(v) Items.god.floor = v end,
+        callback = function(v) Shield.god.floor = v end,
     })
-    itemsTab:CreateDropdown({
-        name = "curacion",
-        flag = "god_amount",
-        options = { "25 (pizza)", "75 (golden pizza)", "999 (golden apple)" },
-        value = "25 (pizza)",
-        callback = function(sel)
-            local text = type(sel) == "table" and sel[1] or sel
-            local amount = tonumber(tostring(text):match("^(%d+)")) or 25
-            Items.god.amount = amount
-            Items.god.food = amount >= 900 and "GoldenApple" or (amount >= 70 and "GoldPizza" or "Pizza")
+    local godLine = itemsTab:CreateText({ name = "estado del hook", text = Shield.status() })
+    itemsTab:CreateButton({
+        name = "estado del semi godmode",
+        callback = function()
+            local text = Shield.status()
+            godLine:Set(text)
+            window:Notify({ title = "semi godmode", content = text, duration = 6 })
         end,
     })
     itemsTab:CreateButton({
-        name = "curarme ahora (energy)",
+        name = "quitar el hook",
+        description = "vuelve a dejar que el juego reste vida normalmente",
         callback = function()
-            local ok = Items.energy(Items.god.amount, Items.god.food)
-            window:Notify({ title = "energy", content = ok and "enviado" or "no pude" })
+            Shield.remove()
+            godLine:Set(Shield.status())
         end,
     })
 
@@ -2831,6 +3040,11 @@ function Menu.build()
         pcall(function() espLine:Set(line) end)
         if Esp.enabled then Esp.apply(list) end
         pcall(function() petLine:Set(Pet.summary()) end)
+        pcall(function()
+            local hp, max = Shield.health()
+            hpLine:Set(hp and string.format("%.0f / %.0f", hp, max) or "sin personaje")
+            godLine:Set(Shield.status())
+        end)
     end)
 
     return window

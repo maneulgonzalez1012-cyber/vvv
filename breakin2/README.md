@@ -19,7 +19,7 @@ the two global escapes are on the Safety tab.
 | --- | --- |
 | **Home** | where you are (base / lobby / private), enemy count, resolved remote count, rescan button, panic button |
 | **Training** | Strength/Speed loop through `RainbowWhatStat`, per-stat interval, jitter, stop-at-N-pips, one-shot bursts |
-| **Items** | 29 objects in four dropdowns, every one reporting whether it actually arrived; stack x10, all weapons at once, survival kit, backpack readout, **semi godmode via `Energy`** |
+| **Items** | 29 objects in four dropdowns, every one reporting whether it actually arrived; stack x10, all weapons at once, survival kit, backpack readout, **+HP out of nothing and semi godmode** |
 | **NPCs** | Uncle Pete's key, Louise for Detective Beans, clear the fallen-tree roadblock, teleports |
 | **Twado** | read what he wants from either UI, feed him, or leave a **watcher** running that checks every 2 s and feeds by itself |
 | **Combat** | throttled `HitBadguy` loop, damage/hits/range, skip boss, single bursts, client-side freeze |
@@ -73,17 +73,35 @@ The first weapon costs a few extra calls; every later one is a single fire.
 *Qué variante de Vending funcionó* in the Items tab shows which one is live, and
 the build gate confirms all nine weapon entries end up in the backpack.
 
-## Semi godmode (`Energy`)
+## Energy: +HP out of nothing, and semi godmode
 
-`Energy` **is** the health bar in Break In 2: 200 max, and hitting 0 kills
-instantly. Every source agrees on the shape — `Energy:FireServer(amount, food)`
-— with 25 for a Pizza, 75 for a Golden Pizza and 999 for a Golden Apple, which
-are the numbers the game itself heals for.
+`Energy` **is** the health bar in Break In 2: 200 max, 0 is instant death. What
+the working scripts show is that the heal is not the food:
 
-It is called *semi* on purpose: it sends a heal when the humanoid drops under a
-floor you pick (60 by default), at most once every 0.6 s. The spam scripts fire
-every frame; that is how a remote gets a player kicked. There is also a one-shot
-*curarme ahora* and a dropdown for the heal size.
+| Call | Effect |
+| --- | --- |
+| `Energy:FireServer(25, "Pizza")` | +25, no pizza needed — the name is a label the server echoes |
+| `Energy:FireServer(999999)` | accepted with a single argument |
+| `Energy:FireServer(-amount, false, false)` | **subtracts** — this is how damage is applied |
+
+So *+25 (sin comer nada)* is one button: send the amount, then look at the
+Humanoid, because the client mirrors server health. If the number went up, the
+call landed; whichever argument shape worked is cached (`amount+food` →
+`amount` → `amount+false`). There is also *sumar esa cantidad* (5–200) and
+*llenar la barra*, which reads `MaxHealth` and sends the missing difference once.
+
+**Semi godmode** is a second mechanism, and it is the one the public scripts
+use: boss attacks apply their damage *through this same remote* with a negative
+amount, so `__namecall` is hooked and a negative is clamped to `0`. That needs
+`hookmetamethod` / `getrawmetatable`, so the feature reports honestly:
+
+- supported executor → the hook goes in, the status shows
+  `hook activo | negativos bloqueados: N`;
+- unsupported → it says so and still runs the periodic top-up;
+- minion hits are applied server-side, which no client hook can stop — the
+  top-up covers those, one heal per 0.6 s under the floor you pick.
+
+*Quitar el hook* restores the original `__namecall`.
 
 ## Twado
 

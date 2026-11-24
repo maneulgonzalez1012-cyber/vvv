@@ -377,88 +377,28 @@ function Items.eat(id)
     return ok
 end
 
--- Energy is the game's health bar: 200 max, 0 is instant death, and every
--- source agrees on the remote shape -
---     Events.Energy:FireServer(amount, foodName)
--- with 25 for a Pizza, 75 for a Golden Pizza and 999 for a Golden Apple
--- (the fandom wiki's numbers, and the same ones the working scripts send).
--- Nobody publishes a cap, so the amount is kept at a value the game itself
--- heals for; a made-up 1e9 is what gets a remote rejected.
+-- Thin delegates: the energy mechanics moved to features/shield.lua, but the
+-- names are kept so older call sites (and saved menus) keep working.
 function Items.energy(amount, food)
-    return Net.fire("Energy", amount, food or "Pizza")
-end
-
-function Items.heal_self()
-    -- the real thing first: eat the food, so the tool's own logic runs
-    if Items.eat("Pizza") then return true end
-    if Items.energy(25, "Pizza") then return true end
-    return false
-end
-
--- Semi-godmode: an Energy call whenever health drops below a floor. "Semi" is
--- literal - it keeps you alive through a wave without pretending to be
--- invulnerable, and it is a third of the refresh rate the spam scripts use
--- (they fire every frame, which is exactly how a remote gets a player kicked).
--- Big heals are spaced; the small top-up only fires when it is needed.
-Items.god = {
-    enabled = false,
-    floor = 60,        -- heal when the humanoid drops under this
-    amount = 25,       -- pizza tier
-    food = "Pizza",
-    interval = 0.6,
-    heals = 0,
-}
-local last_god_heal = nil   -- nil means "never healed yet", not "healed at t=0"
-
-function Items.health()
-    local hum = Net.humanoid()
-    if not hum then return nil end
-    return hum.Health, hum.MaxHealth
+    local Shield = require("features/shield")
+    if food and Shield.energy_variant == 1 then
+        return Net.fire("Energy", amount, food)
+    end
+    return Shield.add_energy(amount, 1.0)
 end
 
 function Items.god_tick()
-    if not Items.god.enabled then return false end
-    local hp = Items.health()
-    if not hp then return false end
-    local now = os.clock or tick
-    if hp > Items.god.floor then return false end
-    if last_god_heal and (now() - last_god_heal) < Items.god.interval then return false end
-    if not Net.fire("Energy", Items.god.amount, Items.god.food) then return false end
-    last_god_heal = now()
-    Items.god.heals = Items.god.heals + 1
-    return true
+    return require("features/shield").god_tick()
 end
 
-function Items.god_start()
-    Items.god.enabled = true
-    U.loop("god", Items.god.interval, function()
-        if not Items.god.enabled then U.stop("god"); return end
-        Items.god_tick()
-    end)
-end
-
-function Items.god_stop()
-    Items.god.enabled = false
-    U.stop("god")
-end
-
--- Heal everyone: the server only trusts players who are actually holding a
--- Golden Apple, so it is given, equipped, then swapped in.
-function Items.heal_all()
-    Items.unequip_all()
-    task.wait(0.15)
-    if not Items.obtain("GoldenApple", 1.0) then
-        return false, "no pude obtener la golden apple"
-    end
-    task.wait(0.2)
-    if not Items.equip("GoldenApple") then
-        return false, "no pude equiparla"
-    end
-    task.wait(0.3)
-    local ok = Net.fire("HealTheNoobs")
-    task.wait(0.3)
-    Items.unequip_all()
-    return ok
+-- Energy lives in features/shield.lua now: the heal does not need a food, so
+-- the food path stays here and the "+25 out of nowhere" path lives there.
+function Items.heal_self()
+    local Shield = require("features/shield")
+    local ok = Shield.add_energy(25, 1.2)
+    if ok then return true end
+    -- last resort: eat something, if the remote path is refused
+    return Items.eat("Pizza")
 end
 
 -- ── Twado ───────────────────────────────────────────────────────────────────
