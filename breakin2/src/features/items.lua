@@ -401,6 +401,24 @@ function Items.heal_self()
     return Items.eat("Pizza")
 end
 
+-- Heal every other player on the server. HealTheNoobs only heals a noob who is
+-- asking, and it needs the golden apple in hand, so the apple is equipped once
+-- and the remote is fired per asking player. Returns ok, reason.
+function Items.heal_all()
+    if not Items.obtain("GoldenApple", 1.2) then
+        return false, "no pude obtener la golden apple"
+    end
+    Items.unequip_all()
+    task.wait(0.1)
+    if not Items.equip_if_present("GoldenApple") then
+        return false, "no pude equipar la golden apple"
+    end
+    if not Net.fire_wait("HealTheNoobs") then
+        return false, "HealTheNoobs no respondio"
+    end
+    return true, "HealTheNoobs enviado"
+end
+
 -- ── Twado ───────────────────────────────────────────────────────────────────
 -- Two places report what the dog wants; both are read, because which one is
 -- populated depends on whether the phone UI has been opened yet.

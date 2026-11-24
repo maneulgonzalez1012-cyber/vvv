@@ -7,7 +7,7 @@ local U = {}
 
 -- Bumped on every build that ships. The Home tab shows it, so an old file that
 -- is still cached somewhere is obvious instead of "the fix did not work".
-U.VERSION = "2026.11.23-c"
+U.VERSION = "2026.11.23-d"
 
 -- filled in by ui/menu once the Rayfield window exists
 U.window = nil

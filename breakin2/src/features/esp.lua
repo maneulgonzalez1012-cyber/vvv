@@ -128,8 +128,8 @@ function Esp.summary(list)
             break
         end
         local piece = e.name
-        if Esp.show_distance and e.dist then piece ..= (" " .. e.dist .. "m") end
-        if Esp.show_health and e.hp then piece ..= (" " .. math.floor(e.hp) .. "hp") end
+        if Esp.show_distance and e.dist then piece = piece .. " " .. e.dist .. "m" end
+        if Esp.show_health and e.hp then piece = piece .. " " .. math.floor(e.hp) .. "hp" end
         table.insert(parts, piece)
     end
     if #parts == 0 then return "sin enemigos" end

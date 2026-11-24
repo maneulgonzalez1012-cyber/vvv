@@ -1,12 +1,14 @@
 -- Prometheus config: Medium, minus NumbersToExpressions.
 --
--- Why the deviation: the stock Medium preset ends with NumbersToExpressions,
--- and its output failed to load in two of the three interpreters the build is
--- verified against (the obfuscated chunk died inside its own runtime before the
--- first user statement). Every other Medium step is kept:
+-- This is the Medium preset with exactly one step removed. NumbersToExpressions
+-- rewrites every numeric literal into an arithmetic expression, which in a
+-- bundle this size inflates the output roughly fivefold and, worse, produced
+-- chunks that died inside their own runtime before the first user statement.
+-- Every other Medium step is kept, in Medium's order:
 --   Vmify, EncryptStrings, AntiTamper, ConstantArray, WrapInFunction, Cff.
 --
--- Verified output runs identically under LuaJIT 2.1, Lua 5.4 and Luau.
+-- The build verifies the shipped bytes under LuaJIT and Luau, so a step that
+-- breaks either one fails the build rather than reaching a player.
 return {
     LuaVersion = "Lua51",
     VarNamePrefix = "",

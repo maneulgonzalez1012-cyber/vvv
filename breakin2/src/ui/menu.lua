@@ -1,814 +1,258 @@
 -- ui/menu.lua
--- Rayfield Gen2 window. Everything off on load, every value saved by flag so a
--- config survives a rejoin.
+-- The shell: one guarded require per module, one pcall per tab.
 --
--- Structure: this file owns layout and nothing else. Each control calls into a
--- feature module; no logic lives here beyond translating a widget into a call.
---
--- No tab icons: Gen2 takes an image (asset id), not an icon name, so a string
--- like "house" renders as nothing. The rail headings do the grouping instead.
-
-local Rayfield = require("ui/rayfield")
+-- Before this, a single failing `require` anywhere (Rayfield, a feature module)
+-- took the whole chunk down, and one bad callback inside a tab cost the rest of
+-- that tab silently. Now:
+--   * every require goes through load(), which records what worked. A dead
+--     module is logged once and replaced by a stub that answers false to every
+--     call, so tabs that mention it still build and their other buttons work.
+--   * every tab is built inside a pcall. A tab that throws loses its own card
+--     and nothing else; the window, the other tabs and the automation bridge
+--     survive, and the failure is listed in the Diagnostics tab.
+--   * every callback is wrapped once, at the point where the widget is created,
+--     so an error inside one button cannot propagate into the UI's event loop.
 
 local U = require("core/util")
-local Net = require("core/net")
-local Game = require("core/game")
-
-local Train = require("features/train")
-local Items = require("features/items")
-local Combat = require("features/combat")
-local Npc = require("features/npc")
-local Move = require("features/move")
-local World = require("features/world")
-local Esp = require("features/esp")
-local Roles = require("features/roles")
-local Pet = require("features/pet")
-local Shield = require("features/shield")
 
 local Menu = {}
 
-function Menu.build()
-    local window = Rayfield:CreateWindow({
-        name = "breaker / break in 2",
-        subtitle = "nothing fires until you flip it",
-        sidebarLayout = true,
-        profile = "external menu",
-        theme = "cobalt",
-        configuration = {
-            autoSave = true,
-            autoLoad = true,
-            fileName = "breaker_bi2",
-            customFolder = "breaker",
-        },
+-- Loaded modules land here; failures land in Menu.errors as name -> message.
+local M = {}
+Menu.modules = M
+Menu.errors = {}
+Menu.ok = {}
+-- Element handles that tabs publish for the HUD loop (text lines, stats).
+Menu.elements = {}
+-- Errors caught inside a wrapped callback. They are swallowed by design (one
+-- bad button must not stop the UI), so they are counted and published here;
+-- the build gate asserts this stays at zero after firing everything.
+Menu.callback_errors = 0
+Menu.on_callback_error = nil
+
+local function stub(name)
+    return setmetatable({}, {
+        __index = function(_, key)
+            return function() return false, "module " .. name .. " no cargo" end
+        end,
+        __call = function() return false, "module " .. name .. " no cargo" end,
     })
+end
+
+local function load(name)
+    local ok, result = pcall(require, name)
+    if ok and type(result) == "table" then
+        M[name] = result
+        table.insert(Menu.ok, name)
+        return result
+    end
+    local message = ok and ("devolvio " .. type(result)) or tostring(result)
+    Menu.errors[name] = message
+    M[name] = stub(name)
+    U.log("module failed", name, message)
+    return M[name]
+end
+
+-- The order matters: core first, because everything else reports through it.
+local CORE = { "core/util", "core/net", "core/game" }
+local FEATURES = {
+    "features/train", "features/items", "features/combat", "features/npc",
+    "features/move", "features/world", "features/esp", "features/roles",
+    "features/pet", "features/shield",
+}
+
+-- Tab modules, in the order the rail shows them.
+local TABS = {
+    "ui/tabs/home", "ui/tabs/training", "ui/tabs/items", "ui/tabs/npcs",
+    "ui/tabs/twado", "ui/tabs/combat", "ui/tabs/move", "ui/tabs/world",
+    "ui/tabs/enemies", "ui/tabs/roles", "ui/tabs/safety",
+}
+
+local function wrap_callbacks(object, label)
+    -- Rayfield takes callbacks inside the props table, so wrapping happens on
+    -- the way in rather than on the element afterwards.
+    if type(object) ~= "table" then return object end
+    for key, value in pairs(object) do
+        if type(value) == "function" and (key == "callback" or key == "Callback") then
+            object[key] = function(...)
+                local ok, err = pcall(value, ...)
+                if not ok then
+                    Menu.callback_errors = Menu.callback_errors + 1
+                    U.log("callback failed", label, tostring(err))
+                    U.notify("error en " .. tostring(label), tostring(err))
+                    if Menu.on_callback_error then
+                        pcall(Menu.on_callback_error, label, tostring(err))
+                    end
+                end
+            end
+        elseif type(value) == "table" then
+            wrap_callbacks(value, label)
+        end
+    end
+    return object
+end
+
+-- A tab handle whose element factories wrap callbacks before Rayfield sees them.
+local function guarded_tab(tab, label)
+    if not tab then return nil end
+    local proxy = {}
+    local function make(method)
+        return function(_, props)
+            wrap_callbacks(props, label)
+            local ok, element = pcall(tab[method], tab, props)
+            if not ok then
+                U.log("element failed", label, method, tostring(element))
+                return setmetatable({}, { __index = function() return function() end end })
+            end
+            return element
+        end
+    end
+    for _, method in ipairs({ "CreateToggle", "CreateSlider", "CreateDropdown", "CreateButton",
+                              "CreateInput", "CreateKeybind", "CreateColorPicker", "CreateStat",
+                              "CreateText", "CreateSection", "CreateGroup", "CreateDivider",
+                              "CreateProgress", "CreateConsole" }) do
+        proxy[method] = make(method)
+    end
+    proxy.raw = tab
+    return proxy
+end
+
+local function guarded_window(window)
+    local proxy = {}
+    local function make_tab(_, props)
+        wrap_callbacks(props, props and props.name or "?")
+        local ok, tab = pcall(window.CreateTab, window, props)
+        if not ok then
+            U.log("tab failed", tostring(props and props.name), tostring(tab))
+            Menu.errors["tab:" .. tostring(props and props.name)] = tostring(tab)
+            return guarded_tab(nil, "?")
+        end
+        return guarded_tab(tab, props and props.name or "?")
+    end
+    proxy.CreateTab = make_tab
+    proxy.CreateSection = function(_, props) return window:CreateSection(props) end
+    proxy.CreateTag = function(_, props) return window:CreateTag(props) end
+    proxy.Notify = function(_, props) return window:Notify(props) end
+    proxy.Toast = function(_, props) return window:Toast(props) end
+    proxy.Unload = function() return window:Unload() end
+    proxy.Get = function(_, flag) return window:Get(flag) end
+    proxy.Set = function(_, flag, value) return window:Set(flag, value) end
+    proxy.raw = window
+    return proxy
+end
+
+function Menu.build()
+    for _, name in ipairs(CORE) do load(name) end
+
+    local Rayfield = load("ui/rayfield")
+    local window = nil
+
+    if Rayfield and type(Rayfield.CreateWindow) == "function" then
+        local ok, created = pcall(function()
+            return Rayfield:CreateWindow({
+                name = "breaker / break in 2",
+                subtitle = "nada dispara hasta que lo enciendas",
+                sidebarLayout = true,
+                profile = "build " .. tostring(U.VERSION),
+                theme = "cobalt",
+                configuration = {
+                    autoSave = true,
+                    autoLoad = true,
+                    fileName = "breaker_bi2",
+                    customFolder = "breaker",
+                },
+            })
+        end)
+        if ok then
+            window = created
+        else
+            Menu.errors["window"] = tostring(created)
+            U.log("window failed", tostring(created))
+        end
+    else
+        Menu.errors["ui/rayfield"] = Menu.errors["ui/rayfield"] or "no disponible"
+    end
+
     U.window = window
     U.flush()
 
-    -- ── HOME ────────────────────────────────────────────────────────────────
-    local home = window:CreateTab({ name = "Home" })
+    if not window then
+        -- No UI: the features are still reachable through the automation
+        -- bridge, and the failure is reported rather than swallowed.
+        U.log("sin ventana; queda el bridge de automatizacion")
+        return nil, Menu.errors
+    end
 
-    home:CreateSection({ name = "estado" })
-    home:CreateText({
-        name = "version",
-        text = "build " .. tostring(U.VERSION),
-    })
-    local placeLine = home:CreateText({ name = "lugar", text = Game.where() })
-    local enemyStat = home:CreateStat({ name = "enemigos", value = 0 })
-    local remoteStat = home:CreateStat({ name = "remotes", value = 0 })
+    for _, name in ipairs(FEATURES) do load(name) end
+    for _, name in ipairs(TABS) do load(name) end
 
-    local enemyLine = home:CreateText({ name = "cercanos", text = "sin enemigos" })
+    local ctx = {
+        window = guarded_window(window),
+        U = M["core/util"], Net = M["core/net"], Game = M["core/game"],
+        Train = M["features/train"], Items = M["features/items"],
+        Combat = M["features/combat"], Npc = M["features/npc"],
+        Move = M["features/move"], World = M["features/world"],
+        Esp = M["features/esp"], Roles = M["features/roles"],
+        Pet = M["features/pet"], Shield = M["features/shield"],
+        Menu = Menu,
+        elements = Menu.elements,
+    }
+    Menu.ctx = ctx
 
-    home:CreateButton({
-        name = "rescan remotes",
-        callback = function()
-            local r = Net.resolve()
-            remoteStat:Set(U.count(r))
-            window:Notify({ title = "remotes", content = U.count(r) .. " resueltos, " ..
-                #Net.missing .. " ausentes" })
-        end,
-    })
-
-    home:CreateButton({
-        name = "panic: apagar todo",
-        description = "restaura movimiento, luz, highlights y loops",
-        callback = function()
-            Train.stop()
-            Combat.stop()
-            Combat.thaw_all()
-            World.reset()
-            Move.reset()
-            Esp.set_enabled(false)
-            Esp.clear()
-            Net.enabled = true
-            window:Notify({ title = "panic", content = "todo apagado" })
-        end,
-    })
-
-    -- ── TRAINING ────────────────────────────────────────────────────────────
-    local trainTab = window:CreateTab({ name = "Training" })
-    trainTab:CreateSection({ name = "auto-train (remoto, visible)" })
-
-    trainTab:CreateToggle({
-        name = "entrenar en loop",
-        flag = "train_loop",
-        value = false,
-        description = "RainbowWhatStat, espaciado al throttle. el server decide si vale",
-        callback = function(v)
-            Train.enabled = v
-            if v then Train.start() else Train.stop() end
-        end,
-    })
-
-    trainTab:CreateDropdown({
-        name = "stats",
-        flag = "train_stats",
-        multiSelect = true,
-        options = { "Strength", "Speed" },
-        value = { "Strength", "Speed" },
-        callback = function(sel)
-            -- multiSelect hands back a list, but a single click can hand back a
-            -- bare string; normalise both so the toggle never wedges
-            if type(sel) == "string" then sel = { sel } end
-            if type(sel) ~= "table" then return end
-            for _, s in ipairs(Game.STATS) do Train.stats[s] = false end
-            for _, s in ipairs(sel) do
-                if Train.stats[s] ~= nil then Train.stats[s] = true end
-            end
-        end,
-    })
-
-    trainTab:CreateSlider({
-        name = "intervalo",
-        flag = "train_interval",
-        range = { 12, 100 },
-        increment = 1,
-        value = 35,
-        suffix = " x10ms",
-        callback = function(v) Train.interval = v / 100 end,
-    })
-
-    trainTab:CreateSlider({
-        name = "parar en pips",
-        flag = "train_target",
-        range = { 0, 10 },
-        increment = 1,
-        value = 5,
-        description = "0 = nunca parar",
-        callback = function(v) Train.target = v end,
-    })
-
-    trainTab:CreateToggle({
-        name = "jitter",
-        flag = "train_jitter",
-        value = true,
-        description = "gap aleatorio, menos metronomo",
-        callback = function(v) Train.jitter = v end,
-    })
-
-    trainTab:CreateSection({ name = "manual" })
-    trainTab:CreateButton({
-        name = "burst strength x5",
-        callback = function() Train.burst("Strength", 5) end,
-    })
-    trainTab:CreateButton({
-        name = "burst speed x5",
-        callback = function() Train.burst("Speed", 5) end,
-    })
-    trainTab:CreateButton({
-        name = "burst ambos x5",
-        callback = function() Train.burst("Both", 5) end,
-    })
-
-    -- ── ITEMS ───────────────────────────────────────────────────────────────
-    -- Every object in the game is reached from here, grouped, and each button
-    -- reports what actually happened: obtained, or the reason it did not.
-    local itemsTab = window:CreateTab({ name = "Items" })
-
-    local function report(id, ok, why)
-        local label = Items.label_of(id)
-        if ok then
-            U.notify(label, "obtenido (" .. tostring(why) .. ")")
-        else
-            U.notify(label, "no llego: " .. tostring(why))
+    -- each tab gets its own pcall: one broken tab costs one tab
+    for _, name in ipairs(TABS) do
+        local mod = M[name]
+        local label = name:gsub("ui/tabs/", "")
+        local ok, err = pcall(mod.build, ctx)
+        if not ok then
+            Menu.errors[label] = tostring(err)
+            U.log("tab failed", label, tostring(err))
         end
     end
 
-    local function obtain_with_ui(id)
-        local ok, why = Items.obtain(id, 1.0)
-        report(id, ok, why)
-        return ok
+    -- the diagnostics tab is built last, so it can list every failure above
+    local okDiag, Diagnostics = pcall(require, "ui/tabs/diagnostics")
+    if okDiag and type(Diagnostics) == "table" then
+        local ok, err = pcall(Diagnostics.build, ctx)
+        if not ok then U.log("diagnostics tab failed", tostring(err)) end
     end
 
-    itemsTab:CreateSection({ name = "comida (GiveTool / vending)" })
-    itemsTab:CreateDropdown({
-        name = "item",
-        flag = "item_food",
-        options = Items.options("comida"),
-        value = Items.label_of("GoldenApple"),
-        callback = function(sel)
-            Menu.picked_food = Items.id_of(type(sel) == "table" and sel[1] or sel)
-        end,
-    })
-    itemsTab:CreateButton({
-        name = "dar",
-        callback = function() obtain_with_ui(Menu.picked_food or "GoldenApple") end,
-    })
-    itemsTab:CreateButton({
-        name = "x10",
-        description = "espaciado al throttle real del remoto",
-        callback = function()
-            local id = Menu.picked_food or "GoldenApple"
-            local fired, gained = Items.stack(id, 10)
-            window:Notify({
-                title = "x10 " .. Items.label_of(id),
-                content = string.format("%d disparos, %d nuevos en mochila", fired, gained),
-            })
-        end,
-    })
+    Menu.hud(ctx)
+    return window, Menu.errors
+end
 
-    itemsTab:CreateSection({ name = "bebidas (GiveTool)" })
-    itemsTab:CreateDropdown({
-        name = "bebida",
-        flag = "item_drink",
-        options = Items.options("bebida"),
-        value = Items.label_of("BloxyCola"),
-        callback = function(sel)
-            Menu.picked_drink = Items.id_of(type(sel) == "table" and sel[1] or sel)
-        end,
-    })
-    itemsTab:CreateButton({
-        name = "dar bebida",
-        callback = function() obtain_with_ui(Menu.picked_drink or "BloxyCola") end,
-    })
+-- The HUD loop lives here because it touches elements from several tabs. Each
+-- line is guarded on its own: a tab that never built simply has no element to
+-- refresh.
+function Menu.hud(ctx)
+    local U_ = M["core/util"]
+    if not U_ then return end
+    U_.loop("hud", 1, function()
+        local Esp = M["features/esp"]
+        local Game = M["core/game"]
+        local Net = M["core/net"]
+        local Shield = M["features/shield"]
+        local Pet = M["features/pet"]
+        local els = Menu.elements or {}
 
-    itemsTab:CreateSection({ name = "armas (Vending / Weapons)" })
-    itemsTab:CreateDropdown({
-        name = "arma",
-        flag = "item_weapon",
-        options = Items.options("armas"),
-        value = Items.label_of("Crowbar3"),
-        callback = function(sel)
-            Menu.picked_weapon = Items.id_of(type(sel) == "table" and sel[1] or sel)
-        end,
-    })
-    itemsTab:CreateButton({
-        name = "dar arma",
-        callback = function() obtain_with_ui(Menu.picked_weapon or "Crowbar3") end,
-    })
-    itemsTab:CreateButton({
-        name = "todas las armas",
-        description = "una de cada, espaciado",
-        callback = function()
-            local got, failed = Items.give_set(
-                { "Crowbar1", "Crowbar2", "Crowbar3", "Bat", "Wrench", "Pitchfork", "Hammer", "Broom" })
-            window:Notify({
-                title = "armas",
-                content = got .. "/8" .. (#failed > 0 and (" | fallo: " .. table.concat(failed, ", ")) or ""),
-            })
-        end,
-    })
-
-    itemsTab:CreateSection({ name = "objetos de mision" })
-    itemsTab:CreateDropdown({
-        name = "objeto",
-        flag = "item_misc",
-        options = Items.options("objetos"),
-        value = Items.label_of("Key"),
-        callback = function(sel)
-            Menu.picked_misc = Items.id_of(type(sel) == "table" and sel[1] or sel)
-        end,
-    })
-    itemsTab:CreateButton({
-        name = "dar objeto",
-        callback = function() obtain_with_ui(Menu.picked_misc or "Key") end,
-    })
-    itemsTab:CreateButton({
-        name = "kit de supervivencia",
-        description = "crowbar3 + medkit + golden apple + cola + chips",
-        callback = function()
-            local got, failed = Items.give_set(Items.survival_set, function(i, n, id, ok)
-                if not ok then U.log("kit", id, i, n) end
+        if els.placeLine and Game then pcall(function() els.placeLine:Set(Game.where()) end) end
+        if Esp then
+            local ok, list = pcall(Esp.read)
+            if ok and els.enemyStat then pcall(function() els.enemyStat:Set(#list) end) end
+            if ok and els.enemyLine then pcall(function() els.enemyLine:Set(Esp.summary(list)) end) end
+            if ok and els.espLine then pcall(function() els.espLine:Set(Esp.summary(list)) end) end
+            if ok and Esp.enabled then pcall(Esp.apply, list) end
+        end
+        if els.remoteStat and Net then pcall(function() els.remoteStat:Set(U_.count(Net.remotes)) end) end
+        if els.petLine and Pet then pcall(function() els.petLine:Set(Pet.summary()) end) end
+        if els.hpLine and Shield then
+            pcall(function()
+                local hp, max = Shield.health()
+                els.hpLine:Set(hp and string.format("%.0f / %.0f", hp, max) or "sin personaje")
             end)
-            window:Notify({
-                title = "kit",
-                content = got .. "/" .. #Items.survival_set ..
-                    (#failed > 0 and (" | fallo: " .. table.concat(failed, ", ")) or ""),
-                duration = 6,
-            })
-        end,
-    })
-
-    itemsTab:CreateSection({ name = "mochila" })
-    itemsTab:CreateButton({
-        name = "que tengo",
-        callback = function()
-            local list = Items.held()
-            window:Notify({
-                title = "mochila (" .. #list .. ")",
-                content = #list > 0 and table.concat(list, ", ") or "vacia",
-                duration = 7,
-            })
-        end,
-    })
-    itemsTab:CreateButton({
-        name = "guardar todo",
-        callback = function() Items.unequip_all() end,
-    })
-
-    itemsTab:CreateButton({
-        name = "que variante de Vending funciono",
-        description = "las armas se prueban en 4 formas; aqui dice cual entregó",
-        callback = function()
-            local variant = Items.weapon_variant
-            local lines = {}
-            for _, v in ipairs({ "name", "player", "no-count", "bare" }) do
-                table.insert(lines, v .. "=" .. tostring(Items.weapon_variant_log[v] or "-"))
-            end
-            window:Notify({
-                title = "vending: " .. (variant and ("variante " .. variant .. " ok") or "sin confirmar"),
-                content = table.concat(lines, "  "),
-                duration = 7,
-            })
-        end,
-    })
-
-    itemsTab:CreateSection({ name = "vida (Energy)" })
-    local hpLine = itemsTab:CreateText({ name = "hp", text = "sin personaje" })
-
-    itemsTab:CreateButton({
-        name = "+25 de vida (sin comer nada)",
-        description = "Energy:FireServer(25) y comprueba que subio",
-        callback = function()
-            local ok, why, hp = Shield.top_up(25)
-            hpLine:Set(string.format("hp %s", tostring(hp)))
-            window:Notify({
-                title = ok and "+25" or "no subio",
-                content = ok and ("via " .. tostring(why)) or tostring(why),
-            })
-        end,
-    })
-
-    itemsTab:CreateSlider({
-        name = "cantidad a sumar",
-        flag = "energy_amount",
-        range = { 5, 200 },
-        increment = 5,
-        value = 25,
-        callback = function(v) Shield.amount = v end,
-    })
-    itemsTab:CreateButton({
-        name = "sumar esa cantidad",
-        callback = function()
-            local ok, why, hp = Shield.add_energy(Shield.amount, 1.2)
-            hpLine:Set(string.format("hp %s", tostring(hp)))
-            window:Notify({ title = ok and ("+" .. Shield.amount) or "no subio", content = tostring(why) })
-        end,
-    })
-    itemsTab:CreateButton({
-        name = "por que no sube (diagnostico)",
-        description = "prueba las formas conocidas y dice cual movio la barra",
-        callback = function()
-            window:Notify({ title = "probando Energy", content = "5 formas, ~3 s", duration = 3 })
-            local report = Shield.diagnose()
-            U.log("energy diagnose\n" .. tostring(report))
-            window:Notify({ title = "resultado", content = tostring(report), duration = 12 })
-            local hp = Shield.health()
-            hpLine:Set(hp and string.format("%.0f", hp) or "?")
-        end,
-    })
-
-    itemsTab:CreateButton({
-        name = "llenar la barra",
-        description = "lee el maximo y suma esa diferencia",
-        callback = function()
-            local hp, max = Shield.health()
-            if not hp or not max then return end
-            local missing = math.ceil(max - hp)
-            if missing <= 0 then
-                window:Notify({ title = "vida", content = "ya esta llena" })
-                return
-            end
-            local ok, why, after = Shield.add_energy(missing, 1.5)
-            hpLine:Set(string.format("hp %s", tostring(after)))
-            window:Notify({ title = ok and "barra llena" or "no subio", content = tostring(why) })
-        end,
-    })
-
-    itemsTab:CreateSection({ name = "semi godmode" })
-    itemsTab:CreateText({
-        name = "que hace",
-        text = "anula los Energy negativos con los que los bosses hacen dano (hook de __namecall) " ..
-               "y ademas mantiene el piso de vida. Los golpes de minion los aplica el server, " ..
-               "esos los cubre el top-up.",
-    })
-    itemsTab:CreateToggle({
-        name = "semi godmode",
-        flag = "god_on",
-        value = false,
-        description = "bloquea dano de boss + energia automatica bajo el piso",
-        callback = function(v)
-            if v then Shield.god_start() else Shield.god_stop() end
-        end,
-    })
-    itemsTab:CreateSlider({
-        name = "piso de vida",
-        flag = "god_floor",
-        range = { 10, 180 },
-        increment = 5,
-        value = 60,
-        callback = function(v) Shield.god.floor = v end,
-    })
-    local godLine = itemsTab:CreateText({ name = "estado del hook", text = Shield.status() })
-    itemsTab:CreateButton({
-        name = "estado del semi godmode",
-        callback = function()
-            local text = Shield.status()
-            godLine:Set(text)
-            window:Notify({ title = "semi godmode", content = text, duration = 6 })
-        end,
-    })
-    itemsTab:CreateButton({
-        name = "quitar el hook",
-        description = "vuelve a dejar que el juego reste vida normalmente",
-        callback = function()
-            Shield.remove()
-            godLine:Set(Shield.status())
-        end,
-    })
-
-    itemsTab:CreateSection({ name = "curas" })
-    itemsTab:CreateButton({
-        name = "curarme",
-        description = "equipa la pizza y la come",
-        callback = function()
-            local ok = Items.heal_self()
-            window:Notify({ title = "heal", content = ok and "hecho" or "no pude" })
-        end,
-    })
-    itemsTab:CreateButton({
-        name = "curar a todos",
-        description = "golden apple + HealTheNoobs",
-        callback = function()
-            local ok, why = Items.heal_all()
-            window:Notify({ title = "heal all", content = ok and "hecho" or tostring(why) })
-        end,
-    })
-
-    -- ── NPCs ────────────────────────────────────────────────────────────────
-    local npcTab = window:CreateTab({ name = "NPCs" })
-    npcTab:CreateSection({ name = "objetivos" })
-    npcTab:CreateButton({
-        name = "liberar a Uncle Pete",
-        callback = function()
-            local ok = Npc.uncle_pete()
-            window:Notify({ title = "pete", content = ok and "llave usada" or "fallo" })
-        end,
-    })
-    npcTab:CreateButton({
-        name = "detective (Louise)",
-        callback = function()
-            local ok = Npc.detective()
-            window:Notify({ title = "detective", content = ok and "louise entregada" or "fallo" })
-        end,
-    })
-    npcTab:CreateButton({
-        name = "alimentar a Twado",
-        description = "lee que comida pide (telefono o nota) y la entrega",
-        callback = function()
-            local _, why = Pet.try_feed()
-            window:Notify({ title = "twado", content = tostring(why) })
-        end,
-    })
-    npcTab:CreateSection({ name = "ruta" })
-    npcTab:CreateButton({
-        name = "despejar el camino (20x por arbol)",
-        callback = function()
-            local n = Npc.clear_road_blocks(20)
-            window:Notify({ title = "road", content = n .. " golpes" })
-        end,
-    })
-    npcTab:CreateSection({ name = "teleport (te ven)" })
-    for key, label in pairs({ pete = "Uncle Pete", louise = "Louise", gym = "gym",
-                              kitchen = "cocina", apple = "golden apple" }) do
-        npcTab:CreateButton({
-            name = "tp: " .. label,
-            callback = function()
-                if Npc.teleport(key) then
-                    window:Toast({ title = "tp", subtitle = label })
-                end
-            end,
-        })
-    end
-
-    -- ── TWADO ───────────────────────────────────────────────────────────────
-    local petTab = window:CreateTab({ name = "Twado" })
-    petTab:CreateText({
-        name = "que quiere",
-        text = "se lee de dos sitios: el telefono (TwadoWants) y la nota (Circle<item>). " ..
-               "Nunca adivina: la comida equivocada cuesta 10 de energia.",
-    })
-    local petLine = petTab:CreateText({ name = "estado", text = Pet.summary() })
-    local petCounter = petTab:CreateStat({ name = "veces alimentado", value = 0 })
-
-    petTab:CreateButton({
-        name = "leer que quiere",
-        callback = function()
-            local wants = Pet.wants()
-            local text = #wants > 0 and table.concat(wants, ", ") or "nada todavia"
-            petLine:Set(text)
-            window:Notify({ title = "twado quiere", content = text, duration = 6 })
-        end,
-    })
-    petTab:CreateButton({
-        name = "alimentar ahora",
-        callback = function()
-            local _, why = Pet.try_feed()
-            petLine:Set(tostring(why))
-            petCounter:Set(Pet.fed_total)
-            window:Notify({ title = "twado", content = tostring(why) })
-        end,
-    })
-    petTab:CreateToggle({
-        name = "detector automatico",
-        flag = "pet_auto",
-        value = false,
-        description = "vigila cada 2 s y le da la comida cuando pide",
-        callback = function(v)
-            if v then Pet.start() else Pet.stop() end
-        end,
-    })
-    petTab:CreateSlider({
-        name = "cada cuanto revisar",
-        flag = "pet_interval",
-        range = { 1, 10 },
-        increment = 1,
-        value = 2,
-        suffix = "s",
-        callback = function(v) Pet.watch_interval = v end,
-    })
-    petTab:CreateDropdown({
-        name = "forzar comida",
-        flag = "pet_food",
-        options = Items.options("comida"),
-        value = Items.label_of("Pizza"),
-        callback = function(sel) Menu.picked_pet = Items.id_of(type(sel) == "table" and sel[1] or sel) end,
-    })
-    petTab:CreateButton({
-        name = "dar esa comida de todas formas",
-        description = "para cuando la GUI no dice nada y tu sabes que toca",
-        callback = function()
-            local _, why = Pet.feed(Menu.picked_pet or "Pizza")
-            petLine:Set(tostring(why))
-            petCounter:Set(Pet.fed_total)
-            window:Notify({ title = "twado", content = tostring(why) })
-        end,
-    })
-
-    -- ── COMBAT ──────────────────────────────────────────────────────────────
-    window:CreateSection({ name = "juego" })
-    local combatTab = window:CreateTab({ name = "Combat" })
-    combatTab:CreateSection({ name = "golpes" })
-    combatTab:CreateToggle({
-        name = "auto hit",
-        flag = "combat_auto",
-        value = false,
-        description = "HitBadguy sobre cada enemigo, throttled",
-        callback = function(v)
-            Combat.auto_hit = v
-            if v then Combat.start() else Combat.stop() end
-        end,
-    })
-    combatTab:CreateSlider({
-        name = "damage",
-        flag = "combat_damage",
-        range = { 10, 200 },
-        increment = 1,
-        value = 65,
-        callback = function(v) Combat.damage = v end,
-    })
-    combatTab:CreateSlider({
-        name = "hits por golpe",
-        flag = "combat_hits",
-        range = { 1, 10 },
-        increment = 1,
-        value = 4,
-        callback = function(v) Combat.hits = v end,
-    })
-    combatTab:CreateSlider({
-        name = "rango",
-        flag = "combat_range",
-        range = { 0, 400 },
-        increment = 10,
-        value = 0,
-        suffix = "m",
-        description = "0 = sin filtro",
-        callback = function(v) Combat.max_range = v end,
-    })
-    combatTab:CreateToggle({
-        name = "ignorar boss",
-        flag = "combat_skip_boss",
-        value = false,
-        callback = function(v) Combat.skip_boss = v end,
-    })
-    combatTab:CreateButton({
-        name = "burst x3",
-        callback = function()
-            local n = Combat.burst(3)
-            window:Notify({ title = "combat", content = n .. " golpes" })
-        end,
-    })
-
-    combatTab:CreateSection({ name = "boss" })
-    combatTab:CreateToggle({
-        name = "congelar enemigos (cliente)",
-        flag = "combat_freeze",
-        value = false,
-        description = "ancla el root local; el server puede reponer posicion",
-        callback = function(v)
-            if v then Combat.freeze(true) else Combat.thaw_all() end
-        end,
-    })
-
-    -- ── MOVE ────────────────────────────────────────────────────────────────
-    local moveTab = window:CreateTab({ name = "Move" })
-    moveTab:CreateSection({ name = "local, sin remotos" })
-    moveTab:CreateToggle({
-        name = "walkspeed",
-        flag = "move_speed",
-        value = false,
-        callback = function(v) Move.speed = v; Move.apply_speed() end,
-    })
-    moveTab:CreateSlider({
-        name = "speed",
-        flag = "move_speed_value",
-        range = { 16, 120 },
-        increment = 2,
-        value = 40,
-        callback = function(v) Move.speed_value = v; Move.apply_speed() end,
-    })
-    moveTab:CreateToggle({
-        name = "jump",
-        flag = "move_jump",
-        value = false,
-        callback = function(v) Move.jump = v; Move.apply_jump() end,
-    })
-    moveTab:CreateSlider({
-        name = "jump power",
-        flag = "move_jump_value",
-        range = { 50, 200 },
-        increment = 5,
-        value = 80,
-        callback = function(v) Move.jump_value = v; Move.apply_jump() end,
-    })
-    moveTab:CreateToggle({
-        name = "noclip",
-        flag = "move_noclip",
-        value = false,
-        callback = function(v) Move.set_noclip(v) end,
-    })
-    moveTab:CreateToggle({
-        name = "fly (body velocity)",
-        flag = "move_fly",
-        value = false,
-        description = "WASD + space/ctrl",
-        callback = function(v) Move.set_fly(v) end,
-    })
-    moveTab:CreateSlider({
-        name = "fly speed",
-        flag = "move_fly_value",
-        range = { 20, 200 },
-        increment = 5,
-        value = 60,
-        callback = function(v) Move.fly_value = v end,
-    })
-
-    -- ── WORLD ───────────────────────────────────────────────────────────────
-    local worldTab = window:CreateTab({ name = "World" })
-    worldTab:CreateSection({ name = "calidad de vida" })
-    worldTab:CreateToggle({
-        name = "luz / sin niebla",
-        flag = "world_bright",
-        value = false,
-        description = "solo tu pantalla",
-        callback = function(v)
-            World.set_bright(v)
-            World.hold_bright(v)
-        end,
-    })
-    worldTab:CreateToggle({
-        name = "anti lodo",
-        flag = "world_mud",
-        value = false,
-        callback = function(v) World.set_anti_mud(v) end,
-    })
-    worldTab:CreateToggle({
-        name = "anti viento",
-        flag = "world_wind",
-        value = false,
-        callback = function(v) World.set_anti_wind(v) end,
-    })
-    worldTab:CreateSection({ name = "cash" })
-    worldTab:CreateButton({
-        name = "recoger cash (una vez)",
-        callback = function()
-            local n = World.collect_cash(60)
-            window:Notify({ title = "cash", content = n .. " pickups" })
-        end,
-    })
-    worldTab:CreateToggle({
-        name = "cash loop",
-        flag = "world_cash",
-        value = false,
-        callback = function(v)
-            World.cash_loop = v
-            if v then World.start_cash() else World.stop_cash() end
-        end,
-    })
-
-    -- ── ENEMIES ─────────────────────────────────────────────────────────────
-    local espTab = window:CreateTab({ name = "Enemies" })
-    espTab:CreateToggle({
-        name = "highlight enemigos",
-        flag = "esp_on",
-        value = false,
-        callback = function(v) Esp.set_enabled(v) end,
-    })
-    espTab:CreateToggle({
-        name = "mostrar distancia",
-        flag = "esp_dist",
-        value = true,
-        callback = function(v) Esp.show_distance = v end,
-    })
-    espTab:CreateToggle({
-        name = "mostrar hp",
-        flag = "esp_hp",
-        value = true,
-        callback = function(v) Esp.show_health = v end,
-    })
-    local espLine = espTab:CreateText({ name = "cercanos", text = "sin enemigos" })
-
-    -- ── ROLES ───────────────────────────────────────────────────────────────
-    window:CreateSection({ name = "sistema" })
-    local roleTab = window:CreateTab({ name = "Roles" })
-    roleTab:CreateText({
-        name = "solo lobby",
-        text = "OutsideRole no se revalida al empezar la ronda; el check de lugar lo hace el modulo.",
-    })
-    for _, r in ipairs(Roles.list) do
-        roleTab:CreateButton({
-            name = "desbloquear: " .. r.label,
-            callback = function()
-                local ok = Roles.unlock(r.value)
-                window:Notify({ title = "roles", content = r.label .. (ok and " ok" or " fallo") })
-            end,
-        })
-    end
-    roleTab:CreateButton({
-        name = "tocar todos los role pads",
-        callback = function()
-            local n = Roles.refresh()
-            window:Notify({ title = "roles", content = n .. " pads" })
-        end,
-    })
-
-    -- ── SAFETY ──────────────────────────────────────────────────────────────
-    local safeTab = window:CreateTab({ name = "Safety" })
-    safeTab:CreateText({
-        name = "como se comporta esto",
-        text = "todo arranca apagado. cada remoto pasa por throttle y por el kill switch. " ..
-               "dry-run imprime sin disparar nada.",
-    })
-    safeTab:CreateToggle({
-        name = "kill switch (desactiva remotos)",
-        flag = "safe_enabled",
-        value = false,
-        description = "apagado = remotos habilitados",
-        callback = function(v) Net.enabled = not v end,
-    })
-    safeTab:CreateToggle({
-        name = "dry-run",
-        flag = "safe_dry",
-        value = false,
-        description = "loguea en vez de disparar",
-        callback = function(v) Net.dryRun = v end,
-    })
-    safeTab:CreateButton({
-        name = "mostrar remotes ausentes",
-        callback = function()
-            if #Net.missing == 0 then
-                window:Notify({ title = "remotes", content = "todos presentes" })
-            else
-                window:Notify({ title = "remotes ausentes", content = table.concat(Net.missing, ", ") })
-            end
-        end,
-    })
-    safeTab:CreateButton({
-        name = "reset contadores",
-        callback = function()
-            Net.resetStats()
-            Train.reset()
-        end,
-    })
-
-    -- ── HUD loop ────────────────────────────────────────────────────────────
-    U.loop("hud", 1, function()
-        pcall(function() placeLine:Set(Game.where()) end)
-        local list = Esp.read()
-        enemyStat:Set(#list)
-        remoteStat:Set(U.count(Net.remotes))
-        local line = Esp.summary(list)
-        pcall(function() enemyLine:Set(line) end)
-        pcall(function() espLine:Set(line) end)
-        if Esp.enabled then Esp.apply(list) end
-        pcall(function() petLine:Set(Pet.summary()) end)
-        pcall(function()
-            local hp, max = Shield.health()
-            hpLine:Set(hp and string.format("%.0f / %.0f", hp, max) or "sin personaje")
-            godLine:Set(Shield.status())
-        end)
+        end
+        if els.godLine and Shield then pcall(function() els.godLine:Set(Shield.status()) end) end
     end)
-
-    return window
 end
 
 return Menu

@@ -56,18 +56,20 @@ end
 function Net.resolve()
     Net.remotes = {}
     Net.missing = {}
+    -- Lua 5.1 target: no `continue`, so the missing container is handled with a
+    -- plain else. Same behaviour, and Prometheus can compile it.
     for containerName, names in pairs(KNOWN) do
         local box = Net.container(containerName)
         if not box then
             for _, n in ipairs(names) do table.insert(Net.missing, containerName .. "." .. n) end
-            continue
-        end
-        for _, n in ipairs(names) do
-            local r = waitChild(box, n, 2)
-            if r and (r:IsA("RemoteEvent") or r:IsA("RemoteFunction") or r:IsA("UnreliableRemoteEvent")) then
-                Net.remotes[n] = r
-            else
-                table.insert(Net.missing, containerName .. "." .. n)
+        else
+            for _, n in ipairs(names) do
+                local r = waitChild(box, n, 2)
+                if r and (r:IsA("RemoteEvent") or r:IsA("RemoteFunction") or r:IsA("UnreliableRemoteEvent")) then
+                    Net.remotes[n] = r
+                else
+                    table.insert(Net.missing, containerName .. "." .. n)
+                end
             end
         end
     end

@@ -1,68 +1,94 @@
 #!/usr/bin/env bash
-# build.sh — bundle, gate, obfuscate each part, assemble, verify.
+# build.sh — pack -> gate -> analyze -> obfuscate (per part) -> assemble -> verify
 #
-# The dist/ artifacts are committed, so this only needs to run when the source
-# changes. It wants a toolchain that is not vendored here:
+# Nothing here is optional. A red step stops the build, because the only thing
+# worse than no artifact is an artifact that half works.
 #
-#   PROMETHEUS  path to a Prometheus checkout (its cli.lua)
-#   LUA         a Lua 5.4 binary to run that cli
-#   LUAU        the Luau CLI (luau-lang/luau, target Luau.Repl.CLI)
-#   LUAJIT      a LuaJIT 2.1 binary
+#   ./build.sh              full build + verification
+#   ./build.sh --fast       skip obfuscation (readable bundle + gate only)
 #
-# Example (the toolchain used for the committed build):
-#   PROMETHEUS=/tmp/Prometheus-master/cli.lua \
-#   LUA=/tmp/lua_bin LUAU=/tmp/luau-master/build/luau \
-#   LUAJIT=/tmp/LuaJIT-2.1/src/luajit ./build.sh
+# Tool locations can be overridden:
+#   LUAJIT_BIN, LUAU_BIN, LUAU_ANALYZE_BIN, PROMETHEUS_DIR (folder with cli.lua)
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-PROMETHEUS="${PROMETHEUS:-/tmp/Prometheus-master/cli.lua}"
-LUA="${LUA:-/tmp/lua_bin}"
-LUAU="${LUAU:-/tmp/luau-master/build/luau}"
-LUAJIT="${LUAJIT:-/tmp/LuaJIT-2.1/src/luajit}"
+LUAJIT_BIN="${LUAJIT_BIN:-/tmp/x_lj/src/luajit}"
+LUAU_BIN="${LUAU_BIN:-/tmp/x_luau/build/luau}"
+LUAU_ANALYZE_BIN="${LUAU_ANALYZE_BIN:-/tmp/x_luau/build/luau-analyze}"
+PROMETHEUS_DIR="${PROMETHEUS_DIR:-/tmp/x_prom}"
+PROMETHEUS_CONFIG="${PROMETHEUS_CONFIG:-build/prometheus.medium.lua}"
 
-step() { printf '\n== %s\n' "$*"; }
+FAST=0
+[[ "${1:-}" == "--fast" ]] && FAST=1
 
-step "bundle"
-python3 build/pack.py
+step() { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
+fail() { printf '\033[1;31m!! %s\033[0m\n' "$*" >&2; exit 1; }
 
-step "gate: load every module, fire every menu callback, item flows"
-"$LUAU" build/out/gate.luau
-
-step "lint"
-mkdir -p build/out
-if command -v luau-analyze >/dev/null 2>&1; then ANALYZE=luau-analyze
-else ANALYZE="$(dirname "$LUAU")/luau-analyze"; fi
-"$ANALYZE" --mode=nonstrict dist/breakin2.lua 2>&1 \
-    | grep -v "Unknown global" > build/out/lint.txt || true
-if [ -s build/out/lint.txt ]; then
-    echo "lint findings:"; cat build/out/lint.txt
-fi
-
-step "obfuscate each part (Prometheus, Medium variant)"
-mkdir -p build/out/obf
-rm -f build/out/obf/*.lua
-for part in build/out/parts/p*.lua; do
-    name="$(basename "$part")"
-    "$LUA" "$PROMETHEUS" --config build/prometheus.medium.lua --LuaU --nocolors \
-        --out "build/out/obf/$name" "$part" >/dev/null
-    printf '  %s  %8d -> %8d bytes\n' "$name" "$(wc -c < "$part")" "$(wc -c < "build/out/obf/$name")"
+for bin in "$LUAJIT_BIN" "$LUAU_BIN" "$LUAU_ANALYZE_BIN"; do
+    [[ -x "$bin" ]] || fail "missing tool: $bin"
 done
 
-step "assemble"
-python3 build/assemble.py
+rm -rf build/out build/out/parts
+mkdir -p build/out/parts dist
 
-step "verify: the assembled file runs under LuaJIT and Luau"
-python3 build/verify.py
-"$LUAJIT" build/out/verify_luajit.lua
-"$LUAU" build/out/verify_luau.luau
+# ── 1. pack ────────────────────────────────────────────────────────────────
+step "1/6 pack"
+python3 build/pack.py
 
-step "summary"
-python3 - <<'PY'
-import hashlib
-for name in ("dist/breakin2.lua", "dist/breakin2_v2.obf.lua"):
-    data = open(name, "rb").read()
-    print("%-24s %8d bytes  sha256=%s" % (
-        name, len(data), hashlib.sha256(data).hexdigest()[:32]))
-PY
+# ── 2. gate ────────────────────────────────────────────────────────────────
+step "2/6 gate (load every module, build every tab, fire every callback)"
+"$LUAU_BIN" build/out/gate.luau | tee build/out/gate.log
+grep -q "GATE OK" build/out/gate.log || fail "gate failed"
+grep -q "callbacks fired=.* failed=0" build/out/gate.log || fail "a callback threw"
+grep -q "fault injection: crashing module contained" build/out/gate.log || fail "module isolation broken"
+
+# ── 3. analyze ─────────────────────────────────────────────────────────────
+step "3/6 analyze (luau-analyze: syntax, unused locals, unknown API)"
+# Unknown globals are the executor's (hookmetamethod, gethui, ...) and `require`
+# is the bundler's, so those two classes are expected; anything else is a bug.
+ANALYZE_LOG=build/out/analyze.log
+"$LUAU_ANALYZE_BIN" --formatter=gnu $(find src -name '*.lua' | sort) \
+    > "$ANALYZE_LOG" 2>&1 || true
+if grep -Ev "Unknown global|Unknown require|Unknown type|unknown global" "$ANALYZE_LOG" | grep -q ":"; then
+    grep -Ev "Unknown global|Unknown require|Unknown type|unknown global" "$ANALYZE_LOG"
+    fail "analyzer reported problems"
+fi
+printf 'analyze clean (%s issues, all executor globals)\n' "$(wc -l < "$ANALYZE_LOG")"
+
+# ── 4. obfuscate, one part at a time ───────────────────────────────────────
+if [[ "$FAST" == "1" ]]; then
+    step "4/6 obfuscate (skipped: --fast)"
+else
+    step "4/6 obfuscate (Prometheus Medium via $PROMETHEUS_CONFIG, per part)"
+    [[ -f "$PROMETHEUS_DIR/cli.lua" ]] || fail "missing Prometheus at $PROMETHEUS_DIR"
+    for part in build/out/parts/p*.lua; do
+        out="${part%.lua}.obf.lua"
+        "$LUAJIT_BIN" "$PROMETHEUS_DIR/cli.lua" --config "$PROMETHEUS_CONFIG" \
+            --Lua51 --nocolors --out "$out" "$part" \
+            > "build/out/$(basename "${part%.lua}").obf.log" 2>&1 \
+            || { tail -20 "build/out/$(basename "${part%.lua}").obf.log"; fail "obfuscation failed: $part"; }
+        printf '  %-28s %8d -> %8d bytes\n' "$(basename "$part")" "$(stat -c%s "$part")" "$(stat -c%s "$out")"
+    done
+fi
+
+# ── 5. assemble ────────────────────────────────────────────────────────────
+if [[ "$FAST" == "1" ]]; then
+    step "5/6 assemble (skipped: --fast)"
+else
+    step "5/6 assemble"
+    python3 build/assemble.py
+fi
+
+# ── 6. verify ──────────────────────────────────────────────────────────────
+step "6/6 verify (luajit + luau, run the shipped bytes)"
+LUAJIT_BIN="$LUAJIT_BIN" LUAU_BIN="$LUAU_BIN" python3 build/verify.py
+
+step "dist"
+ls -l dist
+
+if [[ "$FAST" == "0" ]]; then
+    step "loadstring"
+    url="https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/3fa3ee03-vvv/breakin2/dist/breakin2_v3.obf.lua"
+    printf 'loadstring(game:HttpGet("%s"))()\n' "$url"
+fi

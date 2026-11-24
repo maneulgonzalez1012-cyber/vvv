@@ -4,14 +4,14 @@ A Rayfield **Gen2** menu for *Break In 2* (Cracky4), built from small modules,
 tested without a game client, and shipped obfuscated with Prometheus.
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/3fa3ee03-vvv/breakin2/dist/breakin2_v2.obf.lua"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/3fa3ee03-vvv/breakin2/dist/breakin2_v3.obf.lua"))()
 ```
 
-The published file is `dist/breakin2_v2.obf.lua`; the readable bundle it is
+The published file is `dist/breakin2_v3.obf.lua`; the readable bundle it is
 built from is `dist/breakin2.lua`. The filename changes between releases on
 purpose — a cached old file at the same URL is indistinguishable from a fix
 that did not work. The **Home** tab prints the build id; if it does not say
-`2026.11.23-c`, you are still running an old chunk.
+`2026.11.23-d`, you are still running an old chunk.
 
 ## What it does
 
@@ -31,6 +31,41 @@ the two global escapes are on the Safety tab.
 | **Enemies** | `Highlight` per enemy plus a distance/HP list |
 | **Roles** | free kid roles (`OutsideRole`) in the lobby only, role pads |
 | **Safety** | kill switch, dry-run, remote table, reset counters |
+| **Diagnóstico** | which modules loaded, which failed and why, the remote table, a one-click Energy sweep |
+
+## Architecture: one tab, one file, one failure
+
+The menu used to be a single 800-line `build()`: one bad callback and the rest
+of the tab went with it, one failing `require` and the whole chunk died. It is
+now a shell plus a folder:
+
+```
+src/ui/menu.lua           the window, the HUD loop, and every pcall
+src/ui/tabs/home.lua      one file per tab, each returns Tab.build(ctx)
+src/ui/tabs/…            training items npcs twado combat move world
+                         enemies roles safety diagnostics
+```
+
+`Menu.build()` creates the window, loads the modules through a `require` that
+swallows a dead module into a stub, then builds each tab inside its own `pcall`:
+
+- a module that throws on load becomes a stub that answers `false, "<name> no
+  cargo"` — tabs that mention it still build and their other buttons work;
+- a tab that throws loses its own card, and the reason is listed in
+  **Diagnóstico**;
+- every callback is wrapped where the widget is created, so an error inside one
+  button cannot escape into Rayfield's event loop — it is counted, notified and
+  written to the log instead.
+
+Loading never aborts the script either: if Rayfield itself fails to load, the
+menu reports it and `getgenv().breaker.run("features/items", "obtain", …)` still
+drives every feature from the console. `getgenv().breaker` also exposes
+`unload()`, `errors`, `net` and `loops()`.
+
+The build proves the isolation instead of claiming it: the gate injects a module
+that crashes on load and a tab that crashes on build, and asserts that the other
+tabs still come up (`fault injection: crashing module contained`,
+`isolation: 1 pestaña rota, 2 siguen construyendo`).
 
 ## Items
 
@@ -167,30 +202,47 @@ clamped, or gets the shot dropped.
 ## Build
 
 ```bash
-PROMETHEUS=~/Prometheus/cli.lua LUA=lua5.4 \
-LUAU=~/luau/luau LUAJIT=~/luajit/src/luajit ./build.sh
+./build.sh          # pack, gate, analyze, obfuscate per part, assemble, verify
+./build.sh --fast   # everything except obfuscation (source-level check)
 ```
 
-What the script does:
+The toolchain is not vendored; point the build at it:
 
-1. `build/pack.py` bundles `src/` into `dist/breakin2.lua` — one chunk, a module
-   table, `require("core/net")` resolved in-process. It also emits
-   `build/out/gate.luau`, the whole tree with a Roblox stub.
-2. The gate runs under the Luau CLI: every module loads, `main` runs, then
-   **every menu callback is fired** (toggles on and off, sliders at two values,
-   dropdowns with each option). A callback that errors fails the build.
-3. `luau-analyze --mode=nonstrict` over the bundle; only `Unknown global`
-   findings are tolerated, since those are the Roblox and executor API.
-4. The bundle is split into 4 parts of ~25 KB and each is obfuscated with
-   `build/prometheus.medium.lua`. Prometheus's Cff pass flattens a chunk into
-   one function and LuaJIT caps a function at 65536 constants; the whole bundle
-   in one chunk produced ~70k constants and the obfuscated file would not even
-   parse. Parts stay a third under the limit.
-5. `build/assemble.py` embeds the obfuscated parts into `dist/breakin2.obf.lua`,
-   which is still the single file you publish.
-6. `build/verify.py` produces two runners for that assembled file — one for
-   LuaJIT (Lua 5.1, i.e. what executors run) and one for Luau (what Roblox
-   runs) — and both must print `VERIFY OK`.
+| Variable | Default | What it is |
+| --- | --- | --- |
+| `LUAU_BIN` | `/tmp/x_luau/build/luau` | Luau CLI (`Luau.Repl.CLI`) — runs the gate |
+| `LUAU_ANALYZE_BIN` | `/tmp/x_luau/build/luau-analyze` | Luau analyzer |
+| `LUAJIT_BIN` | `/tmp/x_lj/src/luajit` | LuaJIT 2.1 — runs Prometheus and the 5.1 check |
+| `PROMETHEUS_DIR` | `/tmp/x_prom` | Prometheus checkout (its `cli.lua`) |
+| `PROMETHEUS_CONFIG` | `build/prometheus.medium.lua` | Medium, minus `NumbersToExpressions` |
+
+Six steps, none optional:
+
+1. **pack** — `build/pack.py` bundles `src/` into `dist/breakin2.lua` (one
+   chunk, a module table) and splits the same modules into parts of ~22 KB. It
+   also refuses the build for three classes of mistake: a `require` that names a
+   file that does not exist, a tab calling `Items.something` that the module
+   never defined, and any Luau-only syntax (`+=`, `..=`, `continue`) that the
+   Lua 5.1 obfuscation target cannot parse.
+2. **gate** — the whole tree runs under the Luau CLI against a Roblox stub, and
+   then: every module is loaded in isolation, every tab is built, **every
+   callback is fired**, the catalogue is checked entry by entry, and the
+   features that were reported broken are exercised end to end — the heal must
+   move the health bar +25 without putting a tool in the backpack, the
+   semi-godmode hook must block a `-50` Energy call, weapons must arrive through
+   the vending route, Twado must read what he wants and feed it.
+3. **analyze** — `luau-analyze` over every source file; only `Unknown global`
+   findings are tolerated, because those are the executor and Roblox globals.
+4. **obfuscate** — each part through Prometheus with
+   `build/prometheus.medium.lua`. Parts are small because Cff flattens a chunk
+   into one function and LuaJIT caps a function at 65536 constants; the whole
+   bundle in one chunk would not parse.
+5. **assemble** — `build/assemble.py` embeds the parts into
+   `dist/breakin2_v3.obf.lua`, one file, self-contained.
+6. **verify** — `build/verify.py` runs the **shipped bytes** under LuaJIT and
+   Luau against the same stub, and asserts outcomes rather than an exit code:
+   the bundle loads, `main` reaches the end, no module failed, at least 100 UI
+   elements were created and no callback threw.
 
 ### Why not stock `--preset Medium`
 
@@ -228,3 +280,18 @@ gate:
   included;
 - the enemy highlight only ever parented to `CoreGui`, which most executors
   protect.
+
+Bugs this round caught, all of them silent in game:
+
+- **curar a todos** called `Items.heal_all()`, which did not exist. A button
+  wired to a function nobody wrote only fails when a player clicks it, so the
+  packer now audits every `Module.method` a tab calls against the module;
+- `dist/` shipped a 9 MB bundle because stock Medium's `NumbersToExpressions`
+  inflates every numeric literal; the config that already excluded it was lost
+  with the tree and is restored;
+- the assembled bundle would not parse at all: Prometheus emits `...` at the top
+  level of its VM entry, so the per-part wrappers have to accept varargs;
+- `..=` and `+=` are Luau-only, and the obfuscation target is Lua 5.1 — the
+  enemy-list line and the fly vector were both silently unshippable;
+- if Rayfield failed to download, `ui/rayfield.lua` called `error()` and took
+  the entire script with it, features included.

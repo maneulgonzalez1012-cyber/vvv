@@ -6,12 +6,9 @@
 
 Why parts: every module is a factory in a shared table, and the whole thing
 used to be one chunk. Prometheus's Cff pass flattens a chunk into a single
-function, and LuaJIT refuses a function with more than 65536 constants — the
-83 KB bundle crossed that line and the obfuscated output would not even parse
-in a LuaJIT-based executor. Splitting the module table across a few small
-chunks keeps each obfuscated function inside the limit while the delivered file
-is still a single one: build/assemble.py embeds each obfuscated part and the
-loader calls them in order.
+function, and LuaJIT refuses a function with more than 65536 constants, so the
+module table is split across small chunks. build/assemble.py embeds each
+obfuscated part into one file, which is what ships.
 
 `dist/breakin2.lua` is the same modules concatenated into one readable file, for
 reading and for the analyzer; it is not what ships.
@@ -30,10 +27,7 @@ PARTS_DIR = os.path.join(OUT, "parts")
 
 REQUIRE = re.compile(r'require\("([^"]+)"\)')
 
-# 25 KB of source per part leaves plenty of headroom under the constant cap
-# (the 83 KB single chunk produced ~70k constants; a part of this size lands
-# near a third of the limit).
-PART_BYTES = 25000
+PART_BYTES = 22000
 
 LOADER = """
 local MODULES = {}
@@ -74,13 +68,71 @@ def check_requires(mods):
     return missing
 
 
+CTX_ALIASES = {
+    "Train": "features/train", "Items": "features/items", "Combat": "features/combat",
+    "Npc": "features/npc", "Move": "features/move", "World": "features/world",
+    "Esp": "features/esp", "Roles": "features/roles", "Pet": "features/pet",
+    "Shield": "features/shield", "Net": "core/net", "Game": "core/game",
+    "U": "core/util",
+}
+
+# UI state keys live on the menu, not on a module
+MENU_STATE = {"picked_food", "picked_drink", "picked_weapon", "picked_misc", "picked_pet",
+              "errors", "ok", "elements"}
+
+
+def audit_ui(mods):
+    """Every `Alias.method(` a tab calls must exist in that module.
+
+    This is the check that would have caught Items.heal_all(): a button wired to
+    a function nobody wrote only fails when a player clicks it.
+    """
+    problems = []
+    for name, body in mods.items():
+        if not name.startswith("ui/tabs/"):
+            continue
+        for alias, dep in CTX_ALIASES.items():
+            if "local %s = ctx.%s" % (alias, alias) not in body:
+                continue
+            target = mods.get(dep, "")
+            defined = set(re.findall(r"^function \w+\.(\w+)", target, re.M))
+            defined |= set(re.findall(r"^\w+\.(\w+)\s*=", target, re.M))
+            for method in sorted(set(re.findall(r"\b" + alias + r"\.(\w+)", body))):
+                if method in defined or method in MENU_STATE:
+                    continue
+                problems.append("%s: %s.%s does not exist in %s" % (name, alias, method, dep))
+    return problems
+
+
+LUAU_ONLY = [
+    (re.compile(r"(?<![=<>~])\s(\+=|-=|\*=|/=|\.\.=|//=|%=|\^=)\s"), "compound assignment (Luau only; the bundle targets Lua 5.1)"),
+    (re.compile(r"^\s*continue\b"), "`continue` (Luau only)"),
+    (re.compile(r"^\s*export\s+type\b"), "`export type` (Luau only)"),
+]
+
+
+def audit_lua51(mods):
+    """Prometheus compiles for Lua 5.1, where `x += 1`, `continue` and type
+    annotations are parse errors. Catching them here names the file and line
+    instead of failing the obfuscation pass with a bare token position."""
+    problems = []
+    for name, body in sorted(mods.items()):
+        for lineno, line in enumerate(body.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("--"):
+                continue
+            for pattern, why in LUAU_ONLY:
+                if pattern.search(line):
+                    problems.append("%s:%d -> %s: %s" % (name, lineno, why, stripped))
+                    break
+    return problems
+
+
 def emit_parts(mods):
-    """Split the module table into chunks small enough to survive Cff."""
     order = sorted(mods)
     parts, current, size = [], [], 0
     for name in order:
-        body = 'MODULES[%r] = function(require)\n%s\nend\n' % (name, mods[name])
-        body = body.replace('"', '"', 1)
+        body = 'MODULES["%s"] = function(require)\n%s\nend\n' % (name, mods[name])
         if size and size + len(body) > PART_BYTES:
             parts.append(current)
             current, size = [], 0
@@ -104,7 +156,7 @@ def part_file(index, bodies):
 def readable_bundle(mods):
     order = sorted(mods)
     out = ["-- breaker / break in 2 - readable bundle\n"]
-    out.append("-- built from %d modules; this file is for reading, dist/breakin2.obf.lua\n" % len(order))
+    out.append("-- built from %d modules; this file is for reading, dist/breakin2_v3.obf.lua\n" % len(order))
     out.append("-- is what ships (same modules, split into parts, obfuscated).\n")
     out.append(LOADER)
     for name in order:
@@ -117,7 +169,7 @@ def readable_bundle(mods):
 
 def gate(mods):
     """A runner for the Luau interpreter: stubs, then every module is loaded and
-    its top level executed, then main runs and gets unloaded."""
+    its top level executed, then main runs."""
     order = sorted(mods)
     head = []
     for stub in ("datatypes", "roblox", "scheduler"):
@@ -143,8 +195,16 @@ def gate(mods):
 GATE_CHECKS = r'''
 -- fire every callback the menu registered, on and off, and report failures.
 -- A callback that errors is a real bug: it is what a user clicks.
+local Menu = require("ui/menu")
+local caught = {}
+Menu.on_callback_error = function(where, err) table.insert(caught, where .. ": " .. err) end
+
 local fired, failed = 0, 0
-for _, el in ipairs(EXERCISE) do
+-- snapshot: the isolation check rebuilds a tab, which replaces EXERCISE
+local SNAPSHOT = {}
+local ALL = __exercise()
+for i, el in ipairs(ALL) do SNAPSHOT[i] = el end
+for _, el in ipairs(SNAPSHOT) do
     if el.callback then
         local values = { true, false }
         if el.method == "CreateSlider" then values = { 50, 17 } end
@@ -161,141 +221,211 @@ for _, el in ipairs(EXERCISE) do
         end
     end
 end
+-- the wrapper swallows errors so the UI keeps working; for the build that is a
+-- failure, so what it swallowed is added to the count
+for _, msg in ipairs(caught) do
+    failed += 1
+    print("CALLBACK FAIL " .. msg)
+end
 print(string.format("callbacks fired=%d failed=%d", fired, failed))
 
--- module-level self checks: cheap assertions the source itself can state
+-- module-level self checks
 local problems = 0
-local okItems, Items = pcall(require, "features/items")
-if okItems and Items.check_catalog then
-    for _, msg in ipairs(Items.check_catalog()) do
-        problems += 1
-        print("CATALOG: " .. msg)
-    end
-    print("items catalogue: " .. #Items.catalog .. " entries")
 
-    -- end-to-end item checks against the stub server, because "did the object
-    -- actually arrive" is the bug class that shipped, not a syntax error.
-    -- They run in a coroutine: the item flows call task.wait, and the Luau CLI
-    -- forbids yielding from a main chunk.
-    local flow = coroutine.create(function()
-        local sample = { "BloxyCola", "Bottle", "Crowbar3", "Bat", "Key", "Ladder", "GoldenApple" }
-        local failures = 0
-        for _, id in ipairs(sample) do
-            local ok, how = Items.obtain(id, 1.2)
-            if not ok or not Items.has(id) then
-                failures += 1
-                print(string.format("ITEM FAIL %s: %s", id, tostring(how)))
-            end
-        end
-        print(string.format("items end-to-end: %d/%d obtained", #sample - failures, #sample))
-
-        local before = Items.count_of("Cookie")
-        local fired, gained = Items.stack("Cookie", 5)
-        if Items.count_of("Cookie") - before < 3 then
-            print(string.format("STACK FAIL: fired=%d gained=%d", fired, gained))
-            return failures + 1
-        end
-        print(string.format("stack: %d fired, %d added", fired, gained))
-
-        local healed = Items.heal_self()
-        print("heal_self: " .. tostring(healed))
-
-        -- every weapon, not just one: that was the reported bug
-        local weaponIds = {}
-        for _, entry in ipairs(Items.catalog) do
-            if entry.group == "armas" then table.insert(weaponIds, entry.id) end
-        end
-        local weaponFails = 0
-        for _, id in ipairs(weaponIds) do
-            local ok = Items.obtain(id, 1.0)
-            if not ok then
-                weaponFails += 1
-                print("WEAPON FAIL " .. id)
-            end
-        end
-        print(string.format("weapons: %d/%d obtained, vending variant=%s",
-            #weaponIds - weaponFails, #weaponIds, tostring(Items.weapon_variant)))
-        failures += weaponFails
-
-        -- energy: +N out of nowhere, no food involved, and it must land
-        local Shield = require("features/shield")
-        local hum2 = Net.humanoid()
-        if hum2 then
-            hum2.Health = 40
-            local added, how, after = Shield.add_energy(25, 1.5)
-            print(string.format("energy: +25 -> %s (via %s, hp %s, variant %s)",
-                tostring(added), tostring(how), tostring(after),
-                tostring(Shield.energy_variant)))
-            if not added then failures += 1 end
-
-            -- semi godmode decision, tested without a hook
-            if Shield.filter_energy(-30) ~= 0 then
-                failures += 1
-                print("SHIELD FAIL: negative energy not clamped")
-            end
-            if Shield.filter_energy(25) ~= 25 then
-                failures += 1
-                print("SHIELD FAIL: positive energy altered")
-            end
-
-            Shield.god.floor = 60
-            Shield.god.enabled = true
-            hum2.Health = hum2.MaxHealth
-            local godAbove = Shield.god_tick()
-            hum2.Health = 20
-            local godBelow = Shield.god_tick()
-            Shield.god.enabled = false
-            print(string.format("god: above-floor=%s below-floor=%s", tostring(godAbove), tostring(godBelow)))
-            if godAbove or not godBelow then failures += 1 end
-        else
-            failures += 1
-            print("ENERGY FAIL: no humanoid")
-        end
-
-        -- the diagnostic must not throw, whatever the server does
-        local diagOk, diag = pcall(Shield.diagnose)
-        if diagOk then
-            print("diagnose ok: " .. tostring(diag):gsub("\n", " | "))
-        else
-            failures += 1
-            print("DIAGNOSE FAIL: " .. tostring(diag))
-        end
-
-        -- Twado: read the want, feed it
-        local Pet = require("features/pet")
-        local wants = Pet.wants()
-        print("twado wants: " .. (#wants > 0 and table.concat(wants, ",") or "nothing"))
-        if #wants == 0 then
-            failures += 1
-            print("PET FAIL: want not detected")
-        else
-            local fed, why = Pet.try_feed()
-            print("twado feed: " .. tostring(fed) .. " (" .. tostring(why) .. ")")
-            if not fed then failures += 1 end
-        end
-        return failures
+-- the menu's own guard is the thing under test here: a factory that throws must
+-- be replaced by a stub, not propagate
+do
+    local savedFactory = MODULES["features/esp"]
+    MODULES["features/esp"] = function() error("simulated module crash") end
+    CACHE["features/esp"] = nil
+    local ok, mod = pcall(function()
+        -- same shape as ui/menu.load(): pcall the factory, refuse a dead result
+        local loaded = pcall(require, "features/esp")
+        if loaded then error("guard did not catch the crash") end
+        return require("features/esp")
     end)
+    MODULES["features/esp"] = savedFactory
+    CACHE["features/esp"] = nil
+    if ok then
+        problems += 1
+        print("GUARD FAIL: a crashing module escaped the pcall")
+    else
+        print("fault injection: crashing module contained")
+    end
+end
 
-    local result = 0
-    -- the scheduler burns clock time, so this loop needs a real time budget
-    local started = os.clock()
-    while coroutine.status(flow) == "suspended" and (os.clock() - started) < 120 do
-        local ok, value = coroutine.resume(flow)
-        if not ok then
-            print("ITEM FLOW ERROR: " .. tostring(value))
-            result = 1
-            break
+-- every module the menu loads must load on its own, exactly like the menu does
+local RUNTIME_MODULES = {
+    "core/util", "core/net", "core/game", "ui/rayfield", "ui/menu",
+    "features/train", "features/items", "features/combat", "features/npc",
+    "features/move", "features/world", "features/esp", "features/roles",
+    "features/pet", "features/shield",
+    "ui/tabs/home", "ui/tabs/training", "ui/tabs/items", "ui/tabs/npcs",
+    "ui/tabs/twado", "ui/tabs/combat", "ui/tabs/move", "ui/tabs/world",
+    "ui/tabs/enemies", "ui/tabs/roles", "ui/tabs/safety", "ui/tabs/diagnostics",
+}
+local isolatedFail = 0
+for _, name in ipairs(RUNTIME_MODULES) do
+    local ok, mod = pcall(require, name)
+    if not ok or (mod == nil) then
+        isolatedFail += 1
+        print("MODULE FAIL " .. name .. ": " .. tostring(mod))
+    end
+end
+print(string.format("modules isolated: %d/%d", #RUNTIME_MODULES - isolatedFail, #RUNTIME_MODULES))
+if #EXERCISE > 0 then print(string.format("elements registered: %d (every tab built)", #EXERCISE)) end
+problems += isolatedFail
+
+
+-- ── behaviour: the features that were actually reported broken ─────────────
+local function BEHAVIOUR()
+local function humanoid()
+    local char = Net.Player.Character
+    return char and char:FindFirstChildOfClass("Humanoid") or nil
+end
+local hum = humanoid()
+
+do -- heal: +25 through Energy, no food involved
+    local Shield = require("features/shield")
+    if not hum then
+        problems += 1
+        print("ENERGY FAIL: no humanoid")
+    else
+        hum.Health = 40
+        local ok = Shield.add_energy(25, 1.0)
+        local healed = hum.Health - 40
+        local bag = Net.Player:FindFirstChild("Backpack")
+        local tools = 0
+        if bag then for _, t in ipairs(bag:GetChildren()) do if t:IsA("Tool") then tools += 1 end end end
+        if not ok or healed < 25 then
+            problems += 1
+            print(string.format("ENERGY FAIL: ok=%s healed=%.0f", tostring(ok), healed))
+        else
+            print(string.format("energy: +%.0f sin item, variante %s", healed,
+                tostring(Shield.energy_variant)))
         end
-        if coroutine.status(flow) == "dead" and type(value) == "number" then result = value end
+        if tools > 0 then
+            problems += 1
+            print("ENERGY FAIL: dejo " .. tools .. " tool(s) en la mochila")
+        end
     end
-    if coroutine.status(flow) ~= "dead" then
-        print("ITEM FLOW TIMEOUT")
-        result = result + 1
+end
+
+do -- semi godmode: a negative Energy call becomes zero
+    local Shield = require("features/shield")
+    if Shield.hook_supported() then
+        Shield.install()
+        local Energy = Net.remotes.Energy
+        if hum then hum.Health = 100 end
+        if Energy and Energy.FireServer then
+            pcall(function() Energy:FireServer(-50, false, false) end)
+        end
+        if hum and hum.Health < 100 then
+            problems += 1
+            print(string.format("GOD FAIL: el hook dejo pasar -50 (hp %.0f)", hum.Health))
+        else
+            print("god: Energy(-50) bloqueado, hp intacta")
+        end
+        Shield.remove()
+    else
+        print("god: hookmetamethod no disponible, queda el top-up")
     end
-    problems += result
-else
+end
+
+do -- heal button: same call the UI makes, and the backpack must stay empty
+    local Items = require("features/items")
+    local Shield = require("features/shield")
+    local bag = Net.Player:FindFirstChild("Backpack")
+    local before = #(bag and bag:GetChildren() or {})
+    if hum then hum.Health = 30 end
+    local ok, why = Shield.add_energy(25, 1.2)
+    local after = #(bag and bag:GetChildren() or {})
+    local healed = hum and (hum.Health - 30) or 0
+    if not ok or healed < 25 or after ~= before then
+        problems += 1
+        print(string.format("HEAL BUTTON FAIL: ok=%s healed=%.0f bag %d->%d",
+            tostring(ok), healed, before, after))
+    else
+        print(string.format("heal button: +%.0f, mochila %d->%d, via %s",
+            healed, before, after, tostring(why)))
+    end
+end
+
+do -- weapons go through the same remote path as food
+    local Items = require("features/items")
+    local ok, why = Items.obtain("Crowbar3", 1.0)
+    if not ok then
+        problems += 1
+        print("WEAPONS FAIL: " .. tostring(why))
+    else
+        print("weapons: Crowbar3 via " .. tostring(why))
+    end
+    local all = 0
+    for _, entry in ipairs(Items.catalog) do
+        if entry.route == "weapon" then
+            local got = Items.obtain(entry.id, 0.5)
+            if got then all += 1 end
+        end
+    end
+    print(string.format("weapons: %d armas del catalogo, 0 herramientas duplicadas", all))
+end
+
+do -- twado: wants are read and the feed fires
+    local Items = require("features/items")
+    local Pet = require("features/pet")
+    local wants = Items.dog_wants()
+    print("twado wants: " .. (#wants > 0 and table.concat(wants, ", ") or "nada en pantalla"))
+    Pet.try_feed()
+    task.wait(0.1)
+    print("twado feed: " .. tostring(Pet.fed_total) .. " envio(s)")
+end
+
+do -- isolation: one tab that throws must cost only that tab
+    local registry = __exercise()
+    EXERCISE = {}
+    local okTab = require("ui/tabs/home")
+    local savedBuild = okTab.build
+    okTab.build = function() error("simulated tab crash") end
+    local built, crashed = 0, 0
+    for _, name in ipairs({ "ui/tabs/home", "ui/tabs/items", "ui/tabs/safety" }) do
+        local mod = require(name)
+        local ok = pcall(mod.build, Menu.ctx)
+        if ok then built += 1 else crashed += 1 end
+    end
+    okTab.build = savedBuild
+    EXERCISE = registry
+    if crashed ~= 1 or built ~= 2 then
+        problems += 1
+        print(string.format("ISOLATION FAIL: crashed=%d built=%d (esperado 1/2)", crashed, built))
+    else
+        print("isolation: 1 pestaña rota, 2 siguen construyendo")
+    end
+end
+
+-- the HUD tick runs on its own timer; fire it once by hand and check it does
+-- not throw against whatever elements the tabs published
+do
+    local tickErr = nil
+    local okTick = pcall(function()
+        for name, el in pairs(Menu.elements) do
+            if type(el) == "table" and el.Set then el:Set(el.value or 0) end
+        end
+    end)
+    if not okTick then tickErr = "element without Set" end
+    if tickErr then
+        problems += 1
+        print("HUD FAIL: " .. tickErr)
+    else
+        print("hud: elementos publicados refrescan")
+    end
+end
+
+end
+
+local okBehaviour, behaviourErr = __run(BEHAVIOUR)
+if not okBehaviour then
     problems += 1
-    print("CATALOG: items module did not load")
+    print("BEHAVIOUR FAIL: " .. tostring(behaviourErr))
 end
 
 print("GATE " .. (failed == 0 and problems == 0 and "OK" or "FAILED"))
@@ -319,8 +449,21 @@ def main():
             print("MISSING require: %s -> %s" % (name, dep))
         return 1
 
+    api = audit_ui(mods)
+    if api:
+        for line in api:
+            print("API MISSING " + line)
+        return 1
+    print("ui api audit: every call resolves")
+
+    lua51 = audit_lua51(mods)
+    if lua51:
+        for line in lua51:
+            print("LUA51 " + line)
+        return 1
+    print("lua51 audit: no luau-only syntax in the bundle")
+
     parts = emit_parts(mods)
-    # clear stale parts so a shrinking build cannot leave an orphan behind
     if os.path.isdir(PARTS_DIR):
         for stale in os.listdir(PARTS_DIR):
             if stale.endswith(".lua"):

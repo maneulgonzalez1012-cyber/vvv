@@ -113,13 +113,16 @@ function Move.set_fly(state)
         local r = c and c:FindFirstChild("HumanoidRootPart")
         local cam = workspace.CurrentCamera
         if not r or not cam or not flyBody then return end
+        -- no compound assignment: the shipped bundle is compiled for Lua 5.1,
+        -- where `dir += v` is a syntax error
+        local look, right = cam.CFrame.LookVector, cam.CFrame.RightVector
         local dir = Vector3.zero
-        if UserInputService:IsKeyDown(Enum.KeyCode.W) then dir += cam.CFrame.LookVector end
-        if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir -= cam.CFrame.LookVector end
-        if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir -= cam.CFrame.RightVector end
-        if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir += cam.CFrame.RightVector end
-        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir += Vector3.yAxis end
-        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir -= Vector3.yAxis end
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then dir = dir + look end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir = dir - look end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir = dir - right end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir = dir + right end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.yAxis end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir = dir - Vector3.yAxis end
         flyBody.Velocity = dir.Magnitude > 0 and dir.Unit * Move.fly_value or Vector3.zero
         flyGyro.CFrame = CFrame.new(Vector3.zero, cam.CFrame.LookVector)
     end)

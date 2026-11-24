@@ -26,10 +26,14 @@ else
     -- U.log always works, so the message never gets lost to a missing global
     pcall(function() warn("[breaker] Rayfield Gen2 no cargo: " .. tostring(result)) end)
     U.log("rayfield load failed", tostring(result))
-    error("[breaker] UI no disponible; abortando sin tocar el juego", 0)
+    -- do not error: main still installs the Automation bridge and the menu shows
+    -- a failure card. One broken dependency must not take the script with it.
+    return nil
 end
 
-Rayfield.version = "gen2"
-Rayfield.source = RAYFIELD_GEN2
+if Rayfield then
+    Rayfield.version = "gen2"
+    Rayfield.source = RAYFIELD_GEN2
+end
 
 return Rayfield
