@@ -66,12 +66,18 @@ nunca diverja entre los dos.
 .venv/bin/python tools/luau_check.py                     # Luau real 0.748
 .venv/bin/python tools/loader_run.py                     # loader completo -> menu montado
 .venv/bin/python tools/bootstrap_run.py                  # 12 perfiles de executor x 2 bootstrap
+.venv/bin/python tools/e2e_athena.py --download                # E2E contra el RAW publicado
 ```
 
 `tools/bootstrap_run.py` es el que importa para el "no carga": simula cada
 firma de HTTP que usan los executors, incluido el caso Athena **sin**
 `game:HttpGet`, y comprueba que el payload se descarga y el menu se monta.
 Tambien prueba el respaldo por partes cuando el body llega recortado.
+
+`tools/e2e_athena.py` baja los ficheros ya publicados del raw (loader, payload,
+manifest y partes), simula Athena **sin** `game:HttpGet` y comprueba el flujo
+normal, el respaldo por partes y que la linea de paste antigua efectivamente
+falla (control negativo).
 
 ## Hosting
 

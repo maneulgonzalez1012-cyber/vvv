@@ -36,6 +36,7 @@ python3 roblox/milonarie_tycoon/build.py --check
 .venv/bin/python roblox/milonarie_tycoon/tools/luau_check.py
 .venv/bin/python roblox/milonarie_tycoon/tools/loader_run.py
 .venv/bin/python roblox/milonarie_tycoon/tools/bootstrap_run.py
+.venv/bin/python roblox/milonarie_tycoon/tools/e2e_athena.py --download
 .venv/bin/python roblox/milonarie_tycoon/tools/prometheus_build.py --preset Compact --verify
 ```
 
