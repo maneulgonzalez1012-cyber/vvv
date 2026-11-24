@@ -276,7 +276,7 @@ function ui.saveConfig()
 		writefile(Aero.config.ui.configFile, json)
 		util.log("config guardada: " .. Aero.config.ui.configFile)
 	else
-		local g = (type(getgenv) == "function") and getgenv() or _G
+		local g = Aero.genv
 		g.AeroConfigJson = json
 		util.log("writefile no disponible: config en getgenv().AeroConfigJson")
 	end
@@ -290,7 +290,7 @@ function ui.loadConfig(quiet)
 		end)
 	end
 	if not json then
-		local g = (type(getgenv) == "function") and getgenv() or _G
+		local g = Aero.genv
 		json = g.AeroConfigJson
 	end
 	if not json then

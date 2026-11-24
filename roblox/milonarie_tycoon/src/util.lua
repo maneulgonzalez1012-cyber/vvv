@@ -57,9 +57,22 @@ function util.deepCopy(value)
 	if type(value) ~= "table" then
 		return value
 	end
+	return util.deepCopyWithSeen(value, {})
+end
+
+-- deepCopy con deteccion de ciclos: una tabla autorreferente no cuelga el
+-- proceso (Luau aborta con "stack overflow" si se copia sin control).
+function util.deepCopyWithSeen(value, seen)
+	if type(value) ~= "table" then
+		return value
+	end
+	if seen[value] then
+		return seen[value]
+	end
 	local copy = {}
+	seen[value] = copy
 	for k, v in pairs(value) do
-		copy[k] = util.deepCopy(v)
+		copy[k] = util.deepCopyWithSeen(v, seen)
 	end
 	return copy
 end

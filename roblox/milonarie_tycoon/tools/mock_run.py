@@ -38,14 +38,25 @@ def main() -> int:
 
     lua = make_runtime(runtime)
     lua.execute((ROOT / "tools" / "roblox_mock.lua").read_text(encoding="utf-8"))
-    lua.execute(target.read_text(encoding="utf-8"))
+    lua.globals()["__SRC"] = target.read_text(encoding="utf-8")
+    lua.execute("Mock.runSource(__SRC)")
     results = lua.execute((ROOT / "tools" / "mock_assert.lua").read_text(encoding="utf-8"))
 
     print(f"runtime: {runtime}  target: {target.name}")
-    for name in results["failures"]:
-        print("FAIL  " + name)
-    print(f"{results['passed']} passed, {results['failed']} failed")
-    if results["failed"]:
+    # mock_assert.lua devuelve (passed, failed, detalle) como tupla.
+    if isinstance(results, dict):
+        passed = results["passed"]
+        failed = results["failed"]
+        details = results["failures"]
+    else:
+        passed, failed, details = results[0], results[1], results[2]
+    if isinstance(details, dict):
+        details = "\n".join(str(details[k]) for k in sorted(details))
+    for line in str(details or "").splitlines():
+        if line.strip():
+            print("FAIL  " + line)
+    print(f"{passed} passed, {failed} failed")
+    if failed:
         return 1
     print("mock run: todo ok")
     return 0

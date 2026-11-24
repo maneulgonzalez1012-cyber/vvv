@@ -13,6 +13,7 @@
     --muted: #a09b91;
     --accent: #f2efe9;
     --ok: #3ddc84;
+    --warn: #e0a355;
   }
   * { box-sizing: border-box; }
   body {
@@ -86,13 +87,14 @@
       <b>Pega en el executor con el juego abierto</b>
       <button id="copy-paste">Copiar</button>
     </div>
-<pre id="paste">loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/5e9deb5f-vvv/loader.lua"))()</pre>
+<pre id="paste">loadstring((function()local u="https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/5e9deb5f-vvv/loader.lua";local function b(r,e)if type(r)=="string"and #r&gt;0 then return r end;if type(r)=="table" then local x=r.Body or r.body;if type(x)=="string"and #x&gt;0 then return x end end;if type(e)=="string"and #e&gt;0 then return e end;return nil end;local c={};if type(request)=="function" then c[#c+1]=request end;if type(http_request)=="function" then c[#c+1]=http_request end;if type(syn)=="table" and type(syn.request)=="function" then c[#c+1]=syn.request end;if type(http)=="table" and type(http.request)=="function" then c[#c+1]=http.request end;local s;for _,f in ipairs(c) do local ok,x=pcall(f,{Url=u,Method="GET"});if ok then s=b(x) end;if not s then local o,y=pcall(f,u);if o then s=b(y) end end;if s then break end end;if not s then local ok,x=pcall(function() return game:HttpGet(u) end);if ok then s=b(x) end end;if not s then error("[VANTA] no se pudo descargar el loader") end;return s end)())()</pre>
     <span class="ok" id="status-paste"></span>
   </div>
 
   <div class="card">
     <h2>Como funciona</h2>
     <ul>
+      <li><b>Bootstrap</b>: la linea de paste baja <code>loader.lua</code> con la API HTTP del executor.</li>
       <li><b>Loader</b>: pantalla de carga -&gt; baja el payload ofuscado -&gt; lo ejecuta.</li>
       <li><b>Spy</b>: captura la forma real de los argumentos que el juego manda por los remotes.</li>
       <li><b>Replay</b>: el autofarm reproduce esos argumentos; si no, cobra por via fisica (prompts y partes de dinero).</li>
@@ -115,12 +117,24 @@
   <div class="card">
     <h2>Variantes del payload</h2>
     <table>
-      <tr><th>Fichero</th><th>Preset</th><th>Tamano</th></tr>
-      <tr><td><code>milonarie_tycoon_obfuscated_light.lua</code></td><td>Medium sin Vmify</td><td>675 KB</td></tr>
-      <tr><td><code>milonarie_tycoon_obfuscated.lua</code></td><td>Medium (register VM)</td><td>4.2 MB</td></tr>
-      <tr><td><code>milonarie_tycoon_obfuscated_strong.lua</code></td><td>Strong</td><td>4.5 MB</td></tr>
+      <tr><th>Fichero</th><th>Preset</th><th>Tamano</th><th>Uso</th></tr>
+      <tr><td><code>milonarie_tycoon_obfuscated_compact.lua</code></td><td>Compact (sin Vmify)</td><td>84 KB</td><td><b>por defecto</b></td></tr>
+      <tr><td><code>milonarie_tycoon_obfuscated_light.lua</code></td><td>Medium sin Vmify</td><td>675 KB</td><td>mas ofuscado</td></tr>
+      <tr><td><code>milonarie_tycoon_obfuscated.lua</code></td><td>Medium (register VM)</td><td>4.2 MB</td><td>muy ofuscado</td></tr>
+      <tr><td><code>milonarie_tycoon_obfuscated_strong.lua</code></td><td>Strong</td><td>4.5 MB</td><td>el mas ofuscado</td></tr>
     </table>
-    <p class="muted" style="margin-bottom:0">Para cambiar de variante, edita <code>PAYLOAD_URL</code> en el loader.</p>
+    <p class="muted" style="margin-bottom:0">Para cambiar de variante, edita <code>PAYLOAD_URL</code> en <code>loader.lua</code> (se genera con <code>tools/build_loader.py</code>).</p>
+  </div>
+
+  <div class="card">
+    <h2>Compatibilidad de executors</h2>
+    <ul>
+      <li>La linea de paste <b>no usa <code>game:HttpGet</code></b>: Athena (y otros) lanzan <code>HttpGet is not a valid member of DataModel</code> al indexarlo.</li>
+      <li>Prueba <code>request</code>, <code>http_request</code>, <code>syn.request</code> y <code>http.request</code>, cada uno con sus distintas firmas de respuesta.</li>
+      <li><code>game:HttpGet</code> se queda como ultimo recurso, para los executors que si lo traen.</li>
+      <li>El payload por defecto mide 84&nbsp;KB: entra de sobra en el tope de respuesta que ponen algunos executors (~100&nbsp;KB).</li>
+      <li>Si el body llega recortado, el loader reintenta por partes (<code>release/parts/</code>) y concatena.</li>
+    </ul>
   </div>
 
   <div class="card">
@@ -130,20 +144,35 @@
       <button id="copy-loader">Copiar</button>
     </div>
 <pre id="loader">-- VANTA | MILONARIE TYCOON :: loader
-local PAYLOAD_URL = "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/5e9deb5f-vvv/roblox/milonarie_tycoon/release/milonarie_tycoon_obfuscated_light.lua"
+local PAYLOAD_URL = "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/arena/5e9deb5f-vvv/roblox/milonarie_tycoon/release/milonarie_tycoon_obfuscated_compact.lua"
 
+-- request / http_request / syn.request / http.request y, como ultimo
+-- recurso, game:HttpGet. Cada uno devuelve el body de forma distinta, asi
+-- que se normaliza la respuesta.
 local function fetch(url)
-	if type(request) == "function" then
-		local ok, body = pcall(request, { Url = url, Method = "GET" })
-		if ok and type(body) == "string" and #body > 0 then return body end
-	end
-	if type(http_request) == "function" then
-		local ok, body = pcall(http_request, url)
-		if ok and type(body) == "string" and #body > 0 then return body end
-	end
-	local ok, body = pcall(function() return game:HttpGet(url) end)
-	if ok and type(body) == "string" and #body > 0 then return body end
-	return nil
+  local function body(r, extra)
+    if type(r) == "string" and #r &gt; 0 then return r end
+    if type(r) == "table" then
+      local b = r.Body or r.body
+      if type(b) == "string" and #b &gt; 0 then return b end
+    end
+    if type(extra) == "string" and #extra &gt; 0 then return extra end
+    return nil
+  end
+  local fns = {}
+  if type(request) == "function" then fns[#fns+1] = request end
+  if type(http_request) == "function" then fns[#fns+1] = http_request end
+  if type(syn) == "table" and type(syn.request) == "function" then fns[#fns+1] = syn.request end
+  if type(http) == "table" and type(http.request) == "function" then fns[#fns+1] = http.request end
+  for _, fn in ipairs(fns) do
+    local ok, a = pcall(fn, { Url = url, Method = "GET" })
+    if ok then local b = body(a) if b then return b end end
+    local ok2, a2 = pcall(fn, url)
+    if ok2 then local b = body(a2) if b then return b end end
+  end
+  local ok, a = pcall(function() return game:HttpGet(url) end)
+  if ok then local b = body(a) if b then return b end end
+  return nil
 end
 
 local source = fetch(PAYLOAD_URL)
@@ -158,7 +187,7 @@ chunk()</pre>
     <span class="ok" id="status-loader"></span>
   </div>
 
-  <p class="muted">El loader prueba <code>request</code>/<code>http_request</code> del executor antes que <code>game:HttpGet</code>, porque en Roblox el HttpGet solo acepta dominios en la allowlist del juego.</p>
+  <p class="muted">Si prefieres pegar el loader entero en vez de la linea de paste, usa el bloque de arriba: lleva el cliente HTTP completo, el respaldo por partes y la GUI de carga.</p>
 </div>
 
 <script>

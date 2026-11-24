@@ -19,9 +19,33 @@ do
 ]]
 
 -- Bootstrap: namespace compartido entre re-ejecuciones del script.
-local _genv = (type(getgenv) == "function") and getgenv() or _G
+-- getgenv() es el env global del executor. Sin executor, getfenv() devuelve el
+-- env real de Luau (los globales NO viven en _G, que ademas es read-only).
+-- Cualquiera de los dos puede ser read-only: se protege la escritura.
+local _genv
+if type(getgenv) == "function" then
+	local ok, t = pcall(getgenv)
+	if ok and type(t) == "table" then
+		_genv = t
+	end
+end
+if not _genv and type(getfenv) == "function" then
+	local ok, t = pcall(getfenv)
+	if ok and type(t) == "table" then
+		_genv = t
+	end
+end
+if not _genv then
+	_genv = {}
+end
 Aero = _genv.Aero or {}
-_genv.Aero = Aero
+pcall(function()
+	_genv.Aero = Aero
+end)
+
+-- Env global donde se guarda la config y el estado entre ejecuciones.
+-- Vive fuera de Aero.config a proposito: deepCopy(config) lo copiaria.
+Aero.genv = _genv
 
 Aero.config = {
 	-- Clasificacion de remotes: substring en minusculas contra el path completo del remote.
@@ -138,9 +162,22 @@ function util.deepCopy(value)
 	if type(value) ~= "table" then
 		return value
 	end
+	return util.deepCopyWithSeen(value, {})
+end
+
+-- deepCopy con deteccion de ciclos: una tabla autorreferente no cuelga el
+-- proceso (Luau aborta con "stack overflow" si se copia sin control).
+function util.deepCopyWithSeen(value, seen)
+	if type(value) ~= "table" then
+		return value
+	end
+	if seen[value] then
+		return seen[value]
+	end
 	local copy = {}
+	seen[value] = copy
 	for k, v in pairs(value) do
-		copy[k] = util.deepCopy(v)
+		copy[k] = util.deepCopyWithSeen(v, seen)
 	end
 	return copy
 end
@@ -1106,7 +1143,7 @@ function ui.saveConfig()
 		writefile(Aero.config.ui.configFile, json)
 		util.log("config guardada: " .. Aero.config.ui.configFile)
 	else
-		local g = (type(getgenv) == "function") and getgenv() or _G
+		local g = Aero.genv
 		g.AeroConfigJson = json
 		util.log("writefile no disponible: config en getgenv().AeroConfigJson")
 	end
@@ -1120,7 +1157,7 @@ function ui.loadConfig(quiet)
 		end)
 	end
 	if not json then
-		local g = (type(getgenv) == "function") and getgenv() or _G
+		local g = Aero.genv
 		json = g.AeroConfigJson
 	end
 	if not json then
@@ -1605,7 +1642,7 @@ Aero.main = {}
 local main = Aero.main
 
 function main.run()
-	local g = (type(getgenv) == "function") and getgenv() or _G
+	local g = Aero.genv
 	if g.AeroMilo and g.AeroMilo.destroy then
 		pcall(g.AeroMilo.destroy)
 	end
@@ -1667,7 +1704,7 @@ function main.run()
 end
 
 function main.destroy()
-	local g = (type(getgenv) == "function") and getgenv() or _G
+	local g = Aero.genv
 	if Aero.ui and Aero.ui.root then
 		Aero.ui.root:Destroy()
 		Aero.ui.root = nil

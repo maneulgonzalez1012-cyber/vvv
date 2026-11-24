@@ -42,4 +42,4 @@ check("json del config generable", A.ui.configJson():find("collect") ~= nil)
 check("defaults guardados", A.defaults ~= nil and A.defaults.farm ~= nil)
 check("no hay tasks lanzados infinitos", #Mock.logs() == 6)
 
-return results
+return results.passed, results.failed, table.concat(results.failures, "\n")

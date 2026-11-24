@@ -6,7 +6,9 @@
 	Load order: este archivo primero, luego dist/milonarie_tycoon.lua.
 ]]
 
-local Mock = {}
+-- Luau: los globales viven en el env del chunk, no en _G (que es read-only).
+-- Por eso Mock es global y no local: los asserts lo necesitan.
+Mock = {}
 local spawned = {}
 
 -- Propiedades que en Roblox devuelven nil cuando no estan puestas. El mock no
@@ -23,6 +25,8 @@ local REAL_PROPERTIES = {
 	ZIndexBehavior = true, ResetOnSpawn = true, IgnoreGuiInset = true,
 	AutoButtonColor = true, ClearTextOnFocus = true, MultiLine = true, Active = true,
 	Sit = true, State = true, Occupant = true, CurrentCamera = true,
+	AssemblyLinearVelocity = true, AssemblyAngularVelocity = true,
+	RootPriority = true, Health = true,
 }
 
 local function eventObj(events, name)
@@ -139,6 +143,37 @@ local function newInstance(className)
 		return eventObj(events, n)
 	end
 
+	if className == "Humanoid" then
+		function methods:ChangeState()
+			return nil
+		end
+		function methods:MoveTo()
+			return nil
+		end
+		function methods:EquipTool()
+			return nil
+		end
+		function methods:GetState()
+			return Enum.HumanoidStateType.Jumping
+		end
+	end
+
+	function methods:__fire(name)
+		local e = events[name]
+		if not e then
+			return 0
+		end
+		local input = {
+			UserInputType = Enum.UserInputType.MouseButton1,
+			Position = Vector2.new(10, 10),
+			KeyCode = Enum.KeyCode.RightShift,
+		}
+		for _, fn in ipairs(e.handlers) do
+			fn(input)
+		end
+		return #e.handlers
+	end
+
 	obj = setmetatable({}, {
 		__index = function(_, k)
 			local m = methods[k]
@@ -152,6 +187,9 @@ local function newInstance(className)
 			if REAL_PROPERTIES[k] then
 				if k == "AbsolutePosition" or k == "AbsoluteSize" then
 					return Vector2.new(0, 0)
+				end
+				if k == "AssemblyLinearVelocity" or k == "AssemblyAngularVelocity" then
+					return Vector3.new(0, 0, 0)
 				end
 				return nil
 			end
@@ -211,9 +249,19 @@ Vector3 = {
 		return { X = x, Y = y, Z = z, Magnitude = math.sqrt(x * x + y * y + z * z) }
 	end,
 }
+local CFrameMeta = {}
+CFrameMeta.__add = function(_, _)
+	return CFrame.new()
+end
+CFrameMeta.__sub = function(_, _)
+	return CFrame.new()
+end
 CFrame = {
 	new = function()
-		return { LookVector = Vector3.new(0, 0, -1), RightVector = Vector3.new(1, 0, 0) }
+		return setmetatable({
+			LookVector = Vector3.new(0, 0, -1),
+			RightVector = Vector3.new(1, 0, 0),
+		}, CFrameMeta)
 	end,
 }
 Color3 = { fromRGB = function(r, g, b) return { R = r, G = g, B = b } end }
@@ -245,12 +293,34 @@ tick = function()
 end
 
 -- Roblox expone loadstring (deprecated pero presente); Lua 5.2+ lo elimino.
+local rawLoad = load
+local rawLoadstring = loadstring
 if not loadstring then
-	loadstring = load
+	loadstring = rawLoad
 end
 
+-- loadstring que compila contra el entorno de Roblox (sin debug.getinfo, etc.)
+function loadstring(src, name)
+	if rawLoadstring and setfenv and not Mock.luauMode then
+		local chunk, err = rawLoadstring(src, name)
+		if not chunk then
+			return nil, err
+		end
+		setfenv(chunk, Mock.robloxEnv())
+		return chunk
+	end
+	if rawLoadstring then
+		-- Luau: el chunk hereda el env del caller (que ya es el de Roblox).
+		return rawLoadstring(src, name or "=payload")
+	end
+	return rawLoad(src, name or "=payload")
+end
+
+-- getgenv() en un executor devuelve el env global COMPARTIDO y escribible.
+-- En Luau puro _G es read-only, asi que se usa una tabla propia.
+Mock.executorEnv = {}
 getgenv = function()
-	return _G
+	return Mock.executorEnv
 end
 
 -- Executor hooks: presentes solo si el ejecutor los trae.
@@ -262,6 +332,9 @@ hookmetamethod = function()
 	end
 end
 
+local taskWaitCount = 0
+local taskWaitLimit = 2000
+
 task = {
 	spawn = function(fn, ...)
 		table.insert(spawned, fn)
@@ -270,12 +343,20 @@ task = {
 		table.insert(spawned, fn)
 	end,
 	wait = function(t)
+		taskWaitCount = taskWaitCount + 1
+		if taskWaitCount > taskWaitLimit then
+			error("__MOCK_TASK_WAIT_STOP__", 0)
+		end
 		return t
 	end,
 	delay = function(t, fn)
 		return t
 	end,
 }
+
+function Mock.setTaskWaitLimit(n)
+	taskWaitLimit = n
+end
 
 -- ------------------------------------------------------------------ servicios
 
@@ -324,6 +405,8 @@ Players.LocalPlayer = player
 local ReplicatedStorage = service("ReplicatedStorage")
 local Workspace = service("Workspace")
 Workspace.CurrentCamera = newInstance("Camera")
+-- Roblox expone workspace como global
+workspace = Workspace
 
 local RunService = service("RunService")
 local UIS = service("UserInputService")
@@ -428,19 +511,135 @@ function Mock.logs()
 	return spawned
 end
 
+-- Luau NO expone: debug.getinfo, string.dump, unpack global, _ENV.
+-- Roblox ademas puede capar getfenv/setfenv/newproxy -> Mock.setStrictEnv(true)
+-- reproduce ese caso peor.
+-- El env donde viven los globales reales. En Luau es getfenv(); en Lua 5.x
+-- es _G (en 5.2+ getfenv no existe).
+function Mock.currentEnv()
+	if type(getfenv) == "function" then
+		local ok, t = pcall(getfenv)
+		if ok and type(t) == "table" then
+			return t
+		end
+	end
+	return _G
+end
+
+function Mock.robloxEnv()
+	local env = {}
+	for k, v in pairs(Mock.currentEnv()) do
+		env[k] = v
+	end
+	-- Luau real: sin _ENV, sin _G, sin unpack global
+	-- Luau real: sin _ENV, sin load(), y su _G es read-only.
+	env._ENV = nil
+	env._G = nil
+	-- Luau real SI tiene unpack global (alias de table.unpack).
+	env.unpack = table.unpack
+	-- Luau real tiene getfenv/setfenv/newproxy (compatibilidad 5.1).
+	env.getfenv = function()
+		return env
+	end
+	env.setfenv = function()
+		return nil
+	end
+	env.newproxy = function(mt)
+		local proxy = {}
+		if mt then
+			setmetatable(proxy, {})
+		end
+		return proxy
+	end
+	if Mock.strictEnv then
+		env.getfenv = nil
+		env.setfenv = nil
+		env.newproxy = nil
+	end
+	-- debug de Luau: sin getinfo (existe debug.info)
+	local luauDebug = {}
+	for k, v in pairs(debug) do
+		if k ~= "getinfo" or Mock.keepGetinfo then
+			luauDebug[k] = v
+		end
+	end
+	env.debug = luauDebug
+	-- Luau real NO tiene load(); el chunk se compila con loadstring.
+	env.load = nil
+	-- string sin dump
+	local luauString = {}
+	for k, v in pairs(string) do
+		if k ~= "dump" or Mock.keepDump then
+			luauString[k] = v
+		end
+	end
+	env.string = luauString
+	-- table con pack/unpack
+	local luauTable = {}
+	for k, v in pairs(table) do
+		luauTable[k] = v
+	end
+	luauTable.pack = table.pack or function(...)
+		return { n = select("#", ...), ... }
+	end
+	luauTable.unpack = table.unpack
+	env.table = luauTable
+	Mock.env = env
+	return env
+end
+
+function Mock.setLuauMode(value)
+	Mock.luauMode = value and true or false
+end
+
+function Mock.setEnvFlags(keepGetinfo, keepDump, keepUnpack)
+	Mock.keepGetinfo = keepGetinfo and true or false
+	Mock.keepDump = keepDump and true or false
+	Mock.keepUnpack = keepUnpack and true or false
+end
+
+function Mock.setStrictEnv(value)
+	Mock.strictEnv = value and true or false
+end
+
 function Mock.namespace()
 	-- El payload deuscado puede renombrar el namespace global; se busca por forma.
 	-- remotes.records es la firma: el mock devuelve tablas de evento para cualquier
 	-- propiedad desconocida, asi que un simple typeof no filtra.
-	for _, v in pairs(_G) do
-		if type(v) == "table" and type(v.remotes) == "table"
-			and type(v.remotes.records) == "table" and type(v.config) == "table" then
-			return v
+	local function scan(t)
+		if type(t) ~= "table" then
+			return nil
 		end
+		for _, v in pairs(t) do
+			if type(v) == "table" and type(v.remotes) == "table"
+				and type(v.remotes.records) == "table" and type(v.config) == "table" then
+				return v
+			end
+		end
+		return nil
 	end
-	return nil
+	return scan(Mock.currentEnv()) or scan(Mock.env)
 end
 
-_G.Mock = Mock
+-- Cargar el payload contra el entorno de Roblox (no el de Lua).
+-- En modo Luau el chunk se compila tal cual: el env del caller ya es el de
+-- Roblox (sin debug.getinfo, sin string.dump, sin load, sin _ENV).
+function Mock.runSource(src)
+	local chunk, err
+	if Mock.luauMode then
+		chunk, err = rawLoadstring(src, "@payload")
+	elseif setfenv then
+		chunk, err = rawLoadstring(src)
+		if chunk then
+			setfenv(chunk, Mock.robloxEnv())
+		end
+	else
+		chunk, err = rawLoad(src, "@payload")
+	end
+	if not chunk then
+		error(err or "el payload no compila")
+	end
+	return chunk()
+end
 
 return Mock

@@ -8,7 +8,7 @@ Aero.main = {}
 local main = Aero.main
 
 function main.run()
-	local g = (type(getgenv) == "function") and getgenv() or _G
+	local g = Aero.genv
 	if g.AeroMilo and g.AeroMilo.destroy then
 		pcall(g.AeroMilo.destroy)
 	end
@@ -70,7 +70,7 @@ function main.run()
 end
 
 function main.destroy()
-	local g = (type(getgenv) == "function") and getgenv() or _G
+	local g = Aero.genv
 	if Aero.ui and Aero.ui.root then
 		Aero.ui.root:Destroy()
 		Aero.ui.root = nil

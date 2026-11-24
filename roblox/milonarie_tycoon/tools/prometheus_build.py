@@ -19,6 +19,23 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+# Presets propios: pipeline de steps completo (no heredado de Prometheus).
+# Compact: sin Vmify, sin HoistVmStrings y sin NumbersToExpressions, asi el
+# payload baja de 700 KB a ~84 KB. Ese tamano entra de sobra en el tope de
+# respuesta que ponen algunos executors (~100 KB) y evita el "string too long
+# in loadstring" de los que cortan fuentes grandes.
+COMPACT_STEPS = [
+    "EncryptStrings:HoistVmStrings=false",
+    "AntiTamper:UseDebug=false",
+    "ConstantArray:Threshold=1;StringsOnly=true",
+    "WrapInFunction",
+]
+
+# Base de Prometheus de la que se heredan los ajustes globales (seed, target, nombres).
+LOCAL_PRESETS = {
+    "Compact": {"base": "Medium", "steps": COMPACT_STEPS},
+}
 CACHE = pathlib.Path(os.environ.get("PROMETHEUS_CACHE", pathlib.Path.home() / ".cache" / "prometheus-lua"))
 REPO_URL = "https://github.com/prometheus-lua/Prometheus.git"
 
@@ -72,6 +89,33 @@ local config = {{}}
 for k, v in pairs(Presets[{preset}]) do
 	config[k] = v
 end
+local customSteps = {{ {steps} }}
+if #customSteps > 0 then
+	local steps = {{}}
+	for _, entry in ipairs(customSteps) do
+		local name, settings = entry:match("^([^:]+):?(.*)$")
+		local step = {{ Name = name, Settings = {{}} }}
+		if settings and settings ~= "" then
+			for pair in settings:gmatch("[^;]+") do
+				local key, value = pair:match("^%s*([%w_]+)%s*=%s*(%S+)%s*$")
+				if key then
+					if value == "true" then
+						step.Settings[key] = true
+					elseif value == "false" then
+						step.Settings[key] = false
+					elseif tonumber(value) then
+						step.Settings[key] = tonumber(value)
+					else
+						step.Settings[key] = value
+					end
+				end
+			end
+		end
+		steps[#steps + 1] = step
+	end
+	config.Steps = steps
+end
+
 local drops = {{ {drops} }}
 if #drops > 0 and config.Steps then
 	local kept = {{}}
@@ -140,7 +184,7 @@ def run_lua51(code: str) -> str:
 
 
 def write_preset_config(source_dir: pathlib.Path, preset: str, seed: int, target: str,
-                        drops: list[str] | None = None) -> pathlib.Path:
+                        drops: list[str] | None = None, steps: list[str] | None = None) -> pathlib.Path:
     handle = tempfile.NamedTemporaryFile("w", suffix=".lua", delete=False, encoding="utf-8")
     handle.close()
     code = DUMP_LUA.format(
@@ -150,6 +194,7 @@ def write_preset_config(source_dir: pathlib.Path, preset: str, seed: int, target
         target=target,
         out=lua_quote(handle.name),
         drops=", ".join('"%s"' % d for d in (drops or [])),
+        steps=", ".join('"%s"' % d for d in (steps or [])),
     )
     run_lua51(code)
     return pathlib.Path(handle.name)
@@ -215,13 +260,19 @@ def verify(target: pathlib.Path) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--prometheus", help="ruta a un checkout de Prometheus")
-    parser.add_argument("--preset", default="Medium", choices=["Minify", "Weak", "Cff", "Vmify", "Medium", "Strong"])
+    parser.add_argument("--preset", default="Medium",
+                        choices=["Minify", "Weak", "Cff", "Vmify", "Medium", "Strong", "Compact"],
+                        help="Compact es un pipeline propio (ver COMPACT_STEPS) basedo en Medium.")
     parser.add_argument("--lua-target", default="LuaU", choices=["Lua51", "LuaU"])
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--in", dest="input", default=str(ROOT / "dist" / "milonarie_tycoon.lua"))
     parser.add_argument("--out", dest="output", default=str(ROOT / "release" / "milonarie_tycoon_obfuscated.lua"))
     parser.add_argument("--drop-step", action="append", default=[],
                         help="quita un step del preset (ej: Vmify). Repetible.")
+    parser.add_argument("--steps", default="",
+                        help="lista de steps separada por comas; ignora el preset. "
+                             "Settings por step: 'Nombre:Clave=valor;Clave2=valor2' "
+                             "(ej: AntiTamper:UseDebug=false)")
     parser.add_argument("--verify", action="store_true")
     args = parser.parse_args()
 
@@ -230,7 +281,18 @@ def main() -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     input_file = pathlib.Path(args.input).resolve()
 
-    config_path = write_preset_config(source_dir, args.preset, args.seed, args.lua_target, args.drop_step)
+    preset = args.preset
+    base_preset = preset
+    custom_steps = [s.strip() for s in args.steps.split(",") if s.strip()]
+    if preset in LOCAL_PRESETS:
+        base_preset = LOCAL_PRESETS[preset]["base"]
+        if not custom_steps:
+            custom_steps = list(LOCAL_PRESETS[preset]["steps"])
+    if custom_steps and args.drop_step:
+        dropped = set(args.drop_step)
+        custom_steps = [s for s in custom_steps if s.split(":")[0] not in dropped]
+    config_path = write_preset_config(source_dir, base_preset, args.seed, args.lua_target,
+                                      args.drop_step, custom_steps)
     cli_args = ["--config", str(config_path), "--out", str(target), "--nocolors", str(input_file)]
     print(run_cli(source_dir, cli_args).strip())
 
