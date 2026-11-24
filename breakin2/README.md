@@ -19,8 +19,9 @@ the two global escapes are on the Safety tab.
 | --- | --- |
 | **Home** | where you are (base / lobby / private), enemy count, resolved remote count, rescan button, panic button |
 | **Training** | Strength/Speed loop through `RainbowWhatStat`, per-stat interval, jitter, stop-at-N-pips, one-shot bursts |
-| **Items** | 29 objects in four dropdowns, every one reporting whether it actually arrived; stack x10, all weapons at once, survival kit, backpack readout, heals |
-| **NPCs** | Uncle Pete's key, Louise for Detective Beans, feed Twado (reads which food the GUI is asking for), clear the fallen-tree roadblock, teleports |
+| **Items** | 29 objects in four dropdowns, every one reporting whether it actually arrived; stack x10, all weapons at once, survival kit, backpack readout, **semi godmode via `Energy`** |
+| **NPCs** | Uncle Pete's key, Louise for Detective Beans, clear the fallen-tree roadblock, teleports |
+| **Twado** | read what he wants from either UI, feed him, or leave a **watcher** running that checks every 2 s and feeds by itself |
 | **Combat** | throttled `HitBadguy` loop, damage/hits/range, skip boss, single bursts, client-side freeze |
 | **Move** | WalkSpeed, JumpPower, noclip, BodyVelocity fly — all local, no remotes |
 | **World** | brightness / no fog, anti-mud, anti-wind, cash pickup, cash loop |
@@ -36,7 +37,7 @@ Two remotes hand out objects, and the split is not "food vs weapons":
 | --- | --- | --- |
 | give | `GiveTool:FireServer(name)` | Apple, Cookie, Chips, Pizza, Lollipop, Bloxy Cola, Expired Bloxy Cola, Bottle, MedKit, Key, GoldKey, Louise, Phone, Book, Ladder, Battery |
 | food | `Vending:FireServer(3, name, "Food", playerName, 1)` | RainbowPizza, RainbowPizzaBox |
-| weapon | `Vending:FireServer(3, name, "Weapons", playerName, 1)` | Crowbar1/2/3, Bat, Wrench, Pitchfork, Hammer, Broom |
+| weapon | `Vending:FireServer(3, name, "Weapons", …)` — 4 variants, see below | Crowbar1/2/3, Bat, Wrench, Pitchfork, Hammer, Broom |
 | gold_armor | `Vending:FireServer(3, "Armor2", "Armor", ...)` | the golden armour |
 | auto | give, then food | GoldenApple, GoldPizza — sources disagree, so both are tried |
 
@@ -51,6 +52,53 @@ Names were verified against two working scripts, not invented: `GiveTool` wants
 the tool name with no spaces (`BloxyCola`, `GoldenApple`, `MedKit`, `GoldKey`),
 and the drinks are `BloxyCola` / `ExpiredBloxyCola`, not the in-game display
 names.
+
+### Weapons, and why they were the broken half
+
+Every public script fires `Vending(3, name, "Weapons", X, 1)` but `X` differs
+in each one — the player's name, the `LocalPlayer` object, or nothing — and one
+of the popular hubs is labelled *"the only thing that's lacking in this script
+is the weapons"*. Picking one spelling and hoping is how a weapon button ends up
+doing nothing, so the four shapes are tried in order and **the one that produced
+a tool is cached**:
+
+| Variant | Arguments |
+| --- | --- |
+| `name` | `3, "Crowbar3", "Weapons", playerName, 1` |
+| `player` | `3, "Crowbar3", "Weapons", LocalPlayer, 1` |
+| `no-count` | `3, "Crowbar3", "Weapons", playerName` |
+| `bare` | `3, "Crowbar3", "Weapons"` |
+
+The first weapon costs a few extra calls; every later one is a single fire.
+*Qué variante de Vending funcionó* in the Items tab shows which one is live, and
+the build gate confirms all nine weapon entries end up in the backpack.
+
+## Semi godmode (`Energy`)
+
+`Energy` **is** the health bar in Break In 2: 200 max, and hitting 0 kills
+instantly. Every source agrees on the shape — `Energy:FireServer(amount, food)`
+— with 25 for a Pizza, 75 for a Golden Pizza and 999 for a Golden Apple, which
+are the numbers the game itself heals for.
+
+It is called *semi* on purpose: it sends a heal when the humanoid drops under a
+floor you pick (60 by default), at most once every 0.6 s. The spam scripts fire
+every frame; that is how a remote gets a player kicked. There is also a one-shot
+*curarme ahora* and a dropdown for the heal size.
+
+## Twado
+
+What he wants is exposed in two places, and older scripts read only one, which
+is why the button did nothing until the phone was open:
+
+- `PlayerGui.Phone…DogInfo.TwadoWants.Text`
+- `PlayerGui.Assets.Note.Note.Note` → children named `Circle<Item>` whose
+  `Visible` flag marks the wanted food
+
+Both are read on every check. The watcher polls every 2 s (a once-a-minute
+event in game, not a combat loop), reads first and only then feeds — the wrong
+food costs 10 energy. Three failed attempts and it stops and says so instead of
+cycling through his whole diet. There is also a *forzar comida* button for when
+the UI is blank and you already know what he wants.
 
 ## Remote knowledge
 
@@ -137,6 +185,10 @@ gate:
 
 - items never arrived: the tool name was sent with the display spelling, and
   the vending route was only used for weapons;
+- weapons: the fourth vending argument was a guess, so it is now probed and
+  cached;
+- the semi-godmode cooldown compared against `0` as if it were a timestamp, so
+  the first heal could never fire;
 - x10 fired ten times and delivered about five — call spacing equalled the
   throttle window, so half were rejected;
 - `Items.equip` reparented a tool that did not exist yet, because `await`'s

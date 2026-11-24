@@ -1,5 +1,5 @@
 -- breaker / break in 2 - readable bundle
--- built from 14 modules; this file is for reading, dist/breakin2.obf.lua
+-- built from 15 modules; this file is for reading, dist/breakin2.obf.lua
 -- is what ships (same modules, split into parts, obfuscated).
 
 local MODULES = {}
@@ -779,6 +779,7 @@ MODULES["features/items"] = function(require)
 -- makes the UI honest - a button that says "listo" only after the tool exists.
 
 local Net = require("core/net")
+local U = require("core/util")
 
 local Items = {}
 
@@ -937,8 +938,39 @@ local function fire_food(id)
     return Net.fire_wait("Vending", 3, strip(id), "Food", player_name(), 1)
 end
 
+-- Weapons are the one route nobody agrees on. Every public script fires
+-- Vending(3, name, "Weapons", X, 1) but X is written differently in each:
+-- the player's name, the Player object, or nothing at all. Rather than pick one
+-- and hope, the variants are tried in order and the one that produced a tool is
+-- cached - so the first weapon costs a few extra calls and every later one is a
+-- single fire.
+local WEAPON_VARIANTS = {
+    { label = "name", args = function(id) return 3, strip(id), "Weapons", player_name(), 1 end },
+    { label = "player", args = function(id) return 3, strip(id), "Weapons", Net.Player, 1 end },
+    { label = "no-count", args = function(id) return 3, strip(id), "Weapons", player_name() end },
+    { label = "bare", args = function(id) return 3, strip(id), "Weapons" end },
+}
+
+Items.weapon_variant = nil   -- remembered once one of them works
+Items.weapon_variant_log = {} -- label -> "ok" | "nothing", for the UI
+
 local function fire_weapon(id)
-    return Net.fire_wait("Vending", 3, strip(id), "Weapons", player_name(), 1)
+    if Items.weapon_variant then
+        local v = WEAPON_VARIANTS[Items.weapon_variant]
+        return Net.fire_wait("Vending", v.args(id))
+    end
+    for index, v in ipairs(WEAPON_VARIANTS) do
+        local fired = Net.fire_wait("Vending", v.args(id))
+        if fired and Items.await(id, 0.7) then
+            Items.weapon_variant = index
+            Items.weapon_variant_log[v.label] = "ok"
+            U.log("weapon variant", v.label)
+            return true
+        end
+        Items.weapon_variant_log[v.label] = fired and "nothing" or "not fired"
+        task.wait(Net.gap_of("Vending") + 0.05)
+    end
+    return false
 end
 
 local function fire_armor()
@@ -971,9 +1003,15 @@ local ATTEMPTS = {
 function Items.obtain(id, timeout)
     local entry = byId[id]
     if not entry then return false, "unknown item" end
-    if Items.has(id) and entry.group ~= "armas" then
+    if Items.has(id) then
         -- already holding it; giving again is how duplicates are made, so skip
         return true, "already held"
+    end
+
+    if entry.route == "weapon" then
+        local ok = fire_weapon(id)
+        if ok then return true, "weapon (" .. WEAPON_VARIANTS[Items.weapon_variant].label .. ")" end
+        return false, "ninguna variante de Vending entrego el arma"
     end
 
     local reasons = {}
@@ -1022,6 +1060,22 @@ function Items.unequip_all()
         if t:IsA("Tool") then pcall(function() t.Parent = bag end) end
     end
     return true
+end
+
+-- Every tool the character or backpack holds, de-duplicated and sorted, so the
+-- menu does not have to walk the instances itself.
+function Items.held()
+    local out, seen = {}, {}
+    for _, box in ipairs(containers()) do
+        for _, child in ipairs(box:GetChildren()) do
+            if child:IsA("Tool") and not seen[child.Name] then
+                seen[child.Name] = true
+                table.insert(out, child.Name)
+            end
+        end
+    end
+    table.sort(out)
+    return out
 end
 
 -- ── bulk ────────────────────────────────────────────────────────────────────
@@ -1083,11 +1137,69 @@ function Items.eat(id)
     return ok
 end
 
+-- Energy is the game's health bar: 200 max, 0 is instant death, and every
+-- source agrees on the remote shape -
+--     Events.Energy:FireServer(amount, foodName)
+-- with 25 for a Pizza, 75 for a Golden Pizza and 999 for a Golden Apple
+-- (the fandom wiki's numbers, and the same ones the working scripts send).
+-- Nobody publishes a cap, so the amount is kept at a value the game itself
+-- heals for; a made-up 1e9 is what gets a remote rejected.
+function Items.energy(amount, food)
+    return Net.fire("Energy", amount, food or "Pizza")
+end
+
 function Items.heal_self()
+    -- the real thing first: eat the food, so the tool's own logic runs
     if Items.eat("Pizza") then return true end
-    -- fallback: the energy remote the older scripts use for a top-up
-    if Net.fire("Energy", 25, "Pizza") then return true end
+    if Items.energy(25, "Pizza") then return true end
     return false
+end
+
+-- Semi-godmode: an Energy call whenever health drops below a floor. "Semi" is
+-- literal - it keeps you alive through a wave without pretending to be
+-- invulnerable, and it is a third of the refresh rate the spam scripts use
+-- (they fire every frame, which is exactly how a remote gets a player kicked).
+-- Big heals are spaced; the small top-up only fires when it is needed.
+Items.god = {
+    enabled = false,
+    floor = 60,        -- heal when the humanoid drops under this
+    amount = 25,       -- pizza tier
+    food = "Pizza",
+    interval = 0.6,
+    heals = 0,
+}
+local last_god_heal = nil   -- nil means "never healed yet", not "healed at t=0"
+
+function Items.health()
+    local hum = Net.humanoid()
+    if not hum then return nil end
+    return hum.Health, hum.MaxHealth
+end
+
+function Items.god_tick()
+    if not Items.god.enabled then return false end
+    local hp = Items.health()
+    if not hp then return false end
+    local now = os.clock or tick
+    if hp > Items.god.floor then return false end
+    if last_god_heal and (now() - last_god_heal) < Items.god.interval then return false end
+    if not Net.fire("Energy", Items.god.amount, Items.god.food) then return false end
+    last_god_heal = now()
+    Items.god.heals = Items.god.heals + 1
+    return true
+end
+
+function Items.god_start()
+    Items.god.enabled = true
+    U.loop("god", Items.god.interval, function()
+        if not Items.god.enabled then U.stop("god"); return end
+        Items.god_tick()
+    end)
+end
+
+function Items.god_stop()
+    Items.god.enabled = false
+    U.stop("god")
 end
 
 -- Heal everyone: the server only trusts players who are actually holding a
@@ -1338,6 +1450,7 @@ MODULES["features/npc"] = function(require)
 
 local Net = require("core/net")
 local Items = require("features/items")
+local Pet = require("features/pet")
 local Game = require("core/game")
 local U = require("core/util")
 
@@ -1369,20 +1482,12 @@ function Npc.detective()
     return Net.fire("LouiseGive", 2)
 end
 
--- Twado wants one of a rotating set of foods; the GUI circles say which.
--- Asking the game beats guessing, so the wanted item is read first and the
--- first match is fed.
+-- Twado is handled by features/pet.lua, which reads both UI sources and can
+-- also watch him on its own. This stays as the one-shot step for the NPC tab.
 function Npc.twado()
-    local wants = Items.dog_wants()
-    if #wants == 0 then
-        U.notify("Twado", "no hay comida marcada todavia")
-        return false
-    end
-    for _, want in ipairs(wants) do
-        if Items.feed_dog(want) then return true end
-        task.wait(0.2)
-    end
-    return false
+    local ok, why = Pet.try_feed()
+    if not ok then U.notify("Twado", tostring(why)) end
+    return ok
 end
 
 -- FallenTrees holds the road mission props; RoadMissionEvent reads
@@ -1429,6 +1534,201 @@ function Npc.teleport(key)
 end
 
 return Npc
+
+end
+MODULES["features/pet"] = function(require)
+-- features/pet.lua
+-- Twado, the dog. Two jobs: tell you what he wants, and hand it over.
+--
+-- What he wants is not a constant. The game exposes it in two places depending
+-- on how far along you are:
+--   * the phone UI: PlayerGui.Phone...DogInfo.TwadoWants.Text (a word)
+--   * the note UI:  PlayerGui.Assets.Note.Note.Note, children named
+--                   Circle<Item> whose Visible flag marks the wanted food
+-- Older scripts read only one of those, so the button did nothing until the
+-- player happened to open the right screen. This reads both, every time, and
+-- also watches the dog's own billboard for a "!"/"?" state so a request can be
+-- detected without the phone being open at all.
+--
+-- Feeding is a two-step the game validates: GiveTool the food, equip it, then
+-- CatFed with the item name. Giving the wrong food costs 10 energy, so the
+-- thing is read first, never guessed.
+
+local Net = require("core/net")
+local Items = require("features/items")
+local U = require("core/util")
+
+local Pet = {}
+
+Pet.auto = false            -- watch and feed on its own
+Pet.watch_interval = 2.0
+Pet.max_attempts = 3        -- per request, then it stops and asks for attention
+Pet.attempts = 0
+Pet.last_fed = nil
+Pet.last_want = nil
+Pet.fed_total = 0
+Pet.status = "sin pedir nada"
+
+local function pg()
+    return Net.Player and Net.Player:FindFirstChild("PlayerGui")
+end
+
+-- "Bloxy Cola" -> "BloxyCola"; the remote wants the tool name.
+local function normalize(text)
+    if type(text) ~= "string" then return nil end
+    local clean = text:gsub("%s+", "")
+    if clean == "" then return nil end
+    return clean
+end
+
+-- Every reading of "what does Twado want", most reliable first.
+function Pet.wants()
+    local out, seen = {}, {}
+    local function add(raw)
+        local id = normalize(raw)
+        if id and not seen[id] then
+            seen[id] = true
+            table.insert(out, id)
+        end
+    end
+
+    local gui = pg()
+    if not gui then return out end
+
+    -- 1. the phone's dedicated label
+    local twado = gui:FindFirstChild("TwadoWants", true)
+    if twado and (twado:IsA("TextLabel") or twado:IsA("TextButton")) then
+        add(twado.Text)
+    end
+
+    -- 2. the note's circle markers
+    local assets = gui:FindFirstChild("Assets")
+    local holder = assets and assets:FindFirstChild("Note", true)
+    if holder then
+        for _, v in ipairs(holder:GetDescendants()) do
+            if v.Name:match("^Circle") and v.Visible then
+                add((v.Name:gsub("Circle", "")))
+            end
+        end
+    end
+
+    return out
+end
+
+-- A cheap read of whether the dog is currently asking for anything at all.
+-- Twado carries a billboard whose text changes between states; it is not the
+-- item name, so it is only used to decide whether to look further.
+function Pet.is_asking()
+    local gui = pg()
+    if gui then
+        local twado = gui:FindFirstChild("TwadoWants", true)
+        if twado and twado.Visible and normalize(twado.Text) then return true end
+    end
+
+    local world = game:GetService("Workspace")
+    local dog = world:FindFirstChild("Twado", true)
+        or world:FindFirstChild("SmallCat", true)
+    if dog then
+        local billboard = dog:FindFirstChild("BillboardGui", true)
+        if billboard and billboard:IsA("BillboardGui") then
+            if billboard.Enabled == false then return false end
+            local label = billboard:FindFirstChildWhichIsA("TextLabel", true)
+            if label then
+                local text = normalize(label.Text)
+                if text and text ~= "?" and text ~= "..." then return true end
+            end
+        end
+        -- a bowl or a "wants" part appearing next to the dog means a request
+        for _, child in ipairs(dog:GetChildren()) do
+            if tostring(child.Name):lower():find("want") then return true end
+        end
+    end
+    return false
+end
+
+-- Feed one specific item: give, equip, tell the game.
+function Pet.feed(id)
+    if not id then return false, "sin comida" end
+    if not Items.obtain(id, 1.2) then
+        return false, "no pude obtener " .. id
+    end
+    Items.unequip_all()
+    task.wait(0.12)
+    if not Items.equip_if_present(id) then
+        return false, "no pude equipar " .. id
+    end
+    task.wait(0.2)
+    local ok = Net.fire_wait("CatFed", id)
+    if ok then
+        Pet.last_fed = id
+        Pet.last_want = id
+        Pet.fed_total = Pet.fed_total + 1
+        Pet.attempts = 0
+        Pet.status = "alimentado con " .. id
+    end
+    return ok, ok and "ok" or "CatFed no respondio"
+end
+
+-- Read, then feed. Refusing to guess is deliberate: the wrong food is -10
+-- energy, and the dog remembers.
+function Pet.try_feed()
+    local wants = Pet.wants()
+    if #wants == 0 then
+        if Pet.is_asking() then
+            Pet.status = "pide algo pero la GUI no dice que; abre el telefono"
+        else
+            Pet.status = "no pide nada ahora"
+        end
+        return false, Pet.status
+    end
+
+    if Pet.attempts >= Pet.max_attempts then
+        Pet.status = "me rendi tras " .. Pet.attempts .. " intentos con " .. table.concat(wants, ", ")
+        return false, Pet.status
+    end
+
+    local tried = {}
+    for _, id in ipairs(wants) do
+        table.insert(tried, id)
+        local ok, why = Pet.feed(id)
+        if ok then return true, "alimentado con " .. id end
+        U.log("twado: fallo", id, why)
+        task.wait(0.25)
+    end
+    Pet.attempts = Pet.attempts + 1
+    Pet.status = "no pude con: " .. table.concat(tried, ", ")
+    return false, Pet.status
+end
+
+-- The watcher. Polls slowly - this is a once-a-minute event in the game, not a
+-- combat loop - and stops itself if the toggle goes off.
+function Pet.start()
+    Pet.auto = true
+    U.loop("twado", Pet.watch_interval, function()
+        if not Pet.auto then U.stop("twado"); return end
+        if not Pet.is_asking() and #Pet.wants() == 0 then
+            Pet.status = "esperando a que pida"
+            Pet.attempts = 0
+            return
+        end
+        Pet.try_feed()
+    end)
+end
+
+function Pet.stop()
+    Pet.auto = false
+    U.stop("twado")
+end
+
+function Pet.summary()
+    local wants = Pet.wants()
+    if #wants > 0 then
+        return "quiere: " .. table.concat(wants, ", ")
+    end
+    return Pet.status
+end
+
+return Pet
 
 end
 MODULES["features/roles"] = function(require)
@@ -1818,6 +2118,7 @@ local Move = require("features/move")
 local World = require("features/world")
 local Esp = require("features/esp")
 local Roles = require("features/roles")
+local Pet = require("features/pet")
 
 local Menu = {}
 
@@ -2072,21 +2373,7 @@ function Menu.build()
     itemsTab:CreateButton({
         name = "que tengo",
         callback = function()
-            local held = {}
-            local boxes = {}
-            local char = Net.Player.Character
-            local bag = Net.Player:FindFirstChild("Backpack")
-            if char then table.insert(boxes, char) end
-            if bag then table.insert(boxes, bag) end
-            for _, box in ipairs(boxes) do
-                for _, c in ipairs(box:GetChildren()) do
-                    if c:IsA("Tool") then table.insert(held, c.Name) end
-                end
-            end
-            local seen, list = {}, {}
-            for _, n in ipairs(held) do
-                if not seen[n] then seen[n] = true; table.insert(list, n) end
-            end
+            local list = Items.held()
             window:Notify({
                 title = "mochila (" .. #list .. ")",
                 content = #list > 0 and table.concat(list, ", ") or "vacia",
@@ -2097,6 +2384,66 @@ function Menu.build()
     itemsTab:CreateButton({
         name = "guardar todo",
         callback = function() Items.unequip_all() end,
+    })
+
+    itemsTab:CreateButton({
+        name = "que variante de Vending funciono",
+        description = "las armas se prueban en 4 formas; aqui dice cual entregó",
+        callback = function()
+            local variant = Items.weapon_variant
+            local lines = {}
+            for _, v in ipairs({ "name", "player", "no-count", "bare" }) do
+                table.insert(lines, v .. "=" .. tostring(Items.weapon_variant_log[v] or "-"))
+            end
+            window:Notify({
+                title = "vending: " .. (variant and ("variante " .. variant .. " ok") or "sin confirmar"),
+                content = table.concat(lines, "  "),
+                duration = 7,
+            })
+        end,
+    })
+
+    itemsTab:CreateSection({ name = "semi godmode (Energy)" })
+    itemsTab:CreateText({
+        name = "como funciona",
+        text = "Energy es la barra de vida (200, 0 = muerte). Esto manda Energy cuando " ..
+               "bajas del piso que elijas. No es invulnerabilidad: es un colchon.",
+    })
+    itemsTab:CreateToggle({
+        name = "semi godmode",
+        flag = "god_on",
+        value = false,
+        description = "Energy automatico cuando la vida baja del piso",
+        callback = function(v)
+            if v then Items.god_start() else Items.god_stop() end
+        end,
+    })
+    itemsTab:CreateSlider({
+        name = "piso de vida",
+        flag = "god_floor",
+        range = { 10, 180 },
+        increment = 5,
+        value = 60,
+        callback = function(v) Items.god.floor = v end,
+    })
+    itemsTab:CreateDropdown({
+        name = "curacion",
+        flag = "god_amount",
+        options = { "25 (pizza)", "75 (golden pizza)", "999 (golden apple)" },
+        value = "25 (pizza)",
+        callback = function(sel)
+            local text = type(sel) == "table" and sel[1] or sel
+            local amount = tonumber(tostring(text):match("^(%d+)")) or 25
+            Items.god.amount = amount
+            Items.god.food = amount >= 900 and "GoldenApple" or (amount >= 70 and "GoldPizza" or "Pizza")
+        end,
+    })
+    itemsTab:CreateButton({
+        name = "curarme ahora (energy)",
+        callback = function()
+            local ok = Items.energy(Items.god.amount, Items.god.food)
+            window:Notify({ title = "energy", content = ok and "enviado" or "no pude" })
+        end,
     })
 
     itemsTab:CreateSection({ name = "curas" })
@@ -2136,10 +2483,10 @@ function Menu.build()
     })
     npcTab:CreateButton({
         name = "alimentar a Twado",
-        description = "lee que comida pide la GUI y la entrega",
+        description = "lee que comida pide (telefono o nota) y la entrega",
         callback = function()
-            local ok = Npc.twado()
-            window:Notify({ title = "twado", content = ok and "comido" or "no pude" })
+            local _, why = Pet.try_feed()
+            window:Notify({ title = "twado", content = tostring(why) })
         end,
     })
     npcTab:CreateSection({ name = "ruta" })
@@ -2162,6 +2509,70 @@ function Menu.build()
             end,
         })
     end
+
+    -- ── TWADO ───────────────────────────────────────────────────────────────
+    local petTab = window:CreateTab({ name = "Twado" })
+    petTab:CreateText({
+        name = "que quiere",
+        text = "se lee de dos sitios: el telefono (TwadoWants) y la nota (Circle<item>). " ..
+               "Nunca adivina: la comida equivocada cuesta 10 de energia.",
+    })
+    local petLine = petTab:CreateText({ name = "estado", text = Pet.summary() })
+    local petCounter = petTab:CreateStat({ name = "veces alimentado", value = 0 })
+
+    petTab:CreateButton({
+        name = "leer que quiere",
+        callback = function()
+            local wants = Pet.wants()
+            local text = #wants > 0 and table.concat(wants, ", ") or "nada todavia"
+            petLine:Set(text)
+            window:Notify({ title = "twado quiere", content = text, duration = 6 })
+        end,
+    })
+    petTab:CreateButton({
+        name = "alimentar ahora",
+        callback = function()
+            local _, why = Pet.try_feed()
+            petLine:Set(tostring(why))
+            petCounter:Set(Pet.fed_total)
+            window:Notify({ title = "twado", content = tostring(why) })
+        end,
+    })
+    petTab:CreateToggle({
+        name = "detector automatico",
+        flag = "pet_auto",
+        value = false,
+        description = "vigila cada 2 s y le da la comida cuando pide",
+        callback = function(v)
+            if v then Pet.start() else Pet.stop() end
+        end,
+    })
+    petTab:CreateSlider({
+        name = "cada cuanto revisar",
+        flag = "pet_interval",
+        range = { 1, 10 },
+        increment = 1,
+        value = 2,
+        suffix = "s",
+        callback = function(v) Pet.watch_interval = v end,
+    })
+    petTab:CreateDropdown({
+        name = "forzar comida",
+        flag = "pet_food",
+        options = Items.options("comida"),
+        value = Items.label_of("Pizza"),
+        callback = function(sel) Menu.picked_pet = Items.id_of(type(sel) == "table" and sel[1] or sel) end,
+    })
+    petTab:CreateButton({
+        name = "dar esa comida de todas formas",
+        description = "para cuando la GUI no dice nada y tu sabes que toca",
+        callback = function()
+            local _, why = Pet.feed(Menu.picked_pet or "Pizza")
+            petLine:Set(tostring(why))
+            petCounter:Set(Pet.fed_total)
+            window:Notify({ title = "twado", content = tostring(why) })
+        end,
+    })
 
     -- ── COMBAT ──────────────────────────────────────────────────────────────
     window:CreateSection({ name = "juego" })
@@ -2419,6 +2830,7 @@ function Menu.build()
         pcall(function() enemyLine:Set(line) end)
         pcall(function() espLine:Set(line) end)
         if Esp.enabled then Esp.apply(list) end
+        pcall(function() petLine:Set(Pet.summary()) end)
     end)
 
     return window

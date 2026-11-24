@@ -160,6 +160,11 @@ local function makePlayer()
     p:AddChild(bag)
     local gui = newInstance("PlayerGui", "PlayerGui")
     p:AddChild(gui)
+    -- what Twado wants, as the phone UI shows it
+    local wants = newInstance("TextLabel", "TwadoWants")
+    wants.Text = "Pizza"
+    wants.Visible = true
+    gui:AddChild(wants)
     local char = newInstance("Model", "StubCharacter")
     local hum = newInstance("Humanoid", "Humanoid")
     hum.Health = 100

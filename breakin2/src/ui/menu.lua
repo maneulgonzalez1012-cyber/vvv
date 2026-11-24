@@ -22,6 +22,7 @@ local Move = require("features/move")
 local World = require("features/world")
 local Esp = require("features/esp")
 local Roles = require("features/roles")
+local Pet = require("features/pet")
 
 local Menu = {}
 
@@ -276,21 +277,7 @@ function Menu.build()
     itemsTab:CreateButton({
         name = "que tengo",
         callback = function()
-            local held = {}
-            local boxes = {}
-            local char = Net.Player.Character
-            local bag = Net.Player:FindFirstChild("Backpack")
-            if char then table.insert(boxes, char) end
-            if bag then table.insert(boxes, bag) end
-            for _, box in ipairs(boxes) do
-                for _, c in ipairs(box:GetChildren()) do
-                    if c:IsA("Tool") then table.insert(held, c.Name) end
-                end
-            end
-            local seen, list = {}, {}
-            for _, n in ipairs(held) do
-                if not seen[n] then seen[n] = true; table.insert(list, n) end
-            end
+            local list = Items.held()
             window:Notify({
                 title = "mochila (" .. #list .. ")",
                 content = #list > 0 and table.concat(list, ", ") or "vacia",
@@ -301,6 +288,66 @@ function Menu.build()
     itemsTab:CreateButton({
         name = "guardar todo",
         callback = function() Items.unequip_all() end,
+    })
+
+    itemsTab:CreateButton({
+        name = "que variante de Vending funciono",
+        description = "las armas se prueban en 4 formas; aqui dice cual entregó",
+        callback = function()
+            local variant = Items.weapon_variant
+            local lines = {}
+            for _, v in ipairs({ "name", "player", "no-count", "bare" }) do
+                table.insert(lines, v .. "=" .. tostring(Items.weapon_variant_log[v] or "-"))
+            end
+            window:Notify({
+                title = "vending: " .. (variant and ("variante " .. variant .. " ok") or "sin confirmar"),
+                content = table.concat(lines, "  "),
+                duration = 7,
+            })
+        end,
+    })
+
+    itemsTab:CreateSection({ name = "semi godmode (Energy)" })
+    itemsTab:CreateText({
+        name = "como funciona",
+        text = "Energy es la barra de vida (200, 0 = muerte). Esto manda Energy cuando " ..
+               "bajas del piso que elijas. No es invulnerabilidad: es un colchon.",
+    })
+    itemsTab:CreateToggle({
+        name = "semi godmode",
+        flag = "god_on",
+        value = false,
+        description = "Energy automatico cuando la vida baja del piso",
+        callback = function(v)
+            if v then Items.god_start() else Items.god_stop() end
+        end,
+    })
+    itemsTab:CreateSlider({
+        name = "piso de vida",
+        flag = "god_floor",
+        range = { 10, 180 },
+        increment = 5,
+        value = 60,
+        callback = function(v) Items.god.floor = v end,
+    })
+    itemsTab:CreateDropdown({
+        name = "curacion",
+        flag = "god_amount",
+        options = { "25 (pizza)", "75 (golden pizza)", "999 (golden apple)" },
+        value = "25 (pizza)",
+        callback = function(sel)
+            local text = type(sel) == "table" and sel[1] or sel
+            local amount = tonumber(tostring(text):match("^(%d+)")) or 25
+            Items.god.amount = amount
+            Items.god.food = amount >= 900 and "GoldenApple" or (amount >= 70 and "GoldPizza" or "Pizza")
+        end,
+    })
+    itemsTab:CreateButton({
+        name = "curarme ahora (energy)",
+        callback = function()
+            local ok = Items.energy(Items.god.amount, Items.god.food)
+            window:Notify({ title = "energy", content = ok and "enviado" or "no pude" })
+        end,
     })
 
     itemsTab:CreateSection({ name = "curas" })
@@ -340,10 +387,10 @@ function Menu.build()
     })
     npcTab:CreateButton({
         name = "alimentar a Twado",
-        description = "lee que comida pide la GUI y la entrega",
+        description = "lee que comida pide (telefono o nota) y la entrega",
         callback = function()
-            local ok = Npc.twado()
-            window:Notify({ title = "twado", content = ok and "comido" or "no pude" })
+            local _, why = Pet.try_feed()
+            window:Notify({ title = "twado", content = tostring(why) })
         end,
     })
     npcTab:CreateSection({ name = "ruta" })
@@ -366,6 +413,70 @@ function Menu.build()
             end,
         })
     end
+
+    -- ── TWADO ───────────────────────────────────────────────────────────────
+    local petTab = window:CreateTab({ name = "Twado" })
+    petTab:CreateText({
+        name = "que quiere",
+        text = "se lee de dos sitios: el telefono (TwadoWants) y la nota (Circle<item>). " ..
+               "Nunca adivina: la comida equivocada cuesta 10 de energia.",
+    })
+    local petLine = petTab:CreateText({ name = "estado", text = Pet.summary() })
+    local petCounter = petTab:CreateStat({ name = "veces alimentado", value = 0 })
+
+    petTab:CreateButton({
+        name = "leer que quiere",
+        callback = function()
+            local wants = Pet.wants()
+            local text = #wants > 0 and table.concat(wants, ", ") or "nada todavia"
+            petLine:Set(text)
+            window:Notify({ title = "twado quiere", content = text, duration = 6 })
+        end,
+    })
+    petTab:CreateButton({
+        name = "alimentar ahora",
+        callback = function()
+            local _, why = Pet.try_feed()
+            petLine:Set(tostring(why))
+            petCounter:Set(Pet.fed_total)
+            window:Notify({ title = "twado", content = tostring(why) })
+        end,
+    })
+    petTab:CreateToggle({
+        name = "detector automatico",
+        flag = "pet_auto",
+        value = false,
+        description = "vigila cada 2 s y le da la comida cuando pide",
+        callback = function(v)
+            if v then Pet.start() else Pet.stop() end
+        end,
+    })
+    petTab:CreateSlider({
+        name = "cada cuanto revisar",
+        flag = "pet_interval",
+        range = { 1, 10 },
+        increment = 1,
+        value = 2,
+        suffix = "s",
+        callback = function(v) Pet.watch_interval = v end,
+    })
+    petTab:CreateDropdown({
+        name = "forzar comida",
+        flag = "pet_food",
+        options = Items.options("comida"),
+        value = Items.label_of("Pizza"),
+        callback = function(sel) Menu.picked_pet = Items.id_of(type(sel) == "table" and sel[1] or sel) end,
+    })
+    petTab:CreateButton({
+        name = "dar esa comida de todas formas",
+        description = "para cuando la GUI no dice nada y tu sabes que toca",
+        callback = function()
+            local _, why = Pet.feed(Menu.picked_pet or "Pizza")
+            petLine:Set(tostring(why))
+            petCounter:Set(Pet.fed_total)
+            window:Notify({ title = "twado", content = tostring(why) })
+        end,
+    })
 
     -- ── COMBAT ──────────────────────────────────────────────────────────────
     window:CreateSection({ name = "juego" })
@@ -623,6 +734,7 @@ function Menu.build()
         pcall(function() enemyLine:Set(line) end)
         pcall(function() espLine:Set(line) end)
         if Esp.enabled then Esp.apply(list) end
+        pcall(function() petLine:Set(Pet.summary()) end)
     end)
 
     return window

@@ -199,6 +199,57 @@ if okItems and Items.check_catalog then
 
         local healed = Items.heal_self()
         print("heal_self: " .. tostring(healed))
+
+        -- every weapon, not just one: that was the reported bug
+        local weaponIds = {}
+        for _, entry in ipairs(Items.catalog) do
+            if entry.group == "armas" then table.insert(weaponIds, entry.id) end
+        end
+        local weaponFails = 0
+        for _, id in ipairs(weaponIds) do
+            local ok = Items.obtain(id, 1.0)
+            if not ok then
+                weaponFails += 1
+                print("WEAPON FAIL " .. id)
+            end
+        end
+        print(string.format("weapons: %d/%d obtained, vending variant=%s",
+            #weaponIds - weaponFails, #weaponIds, tostring(Items.weapon_variant)))
+        failures += weaponFails
+
+        -- semi godmode: no heal above the floor, one heal below it
+        local hum = Net.humanoid()
+        if hum then
+            hum.Health = hum.MaxHealth
+            -- the menu callbacks above ran with 50/17 on every slider, so the
+            -- floor is whatever the last callback left it at. Pin it here.
+            Items.god.floor = 60
+            local healedAboveFloor = Items.god_tick()
+            hum.Health = 20
+            Items.god.enabled = true
+            local healedBelowFloor = Items.god_tick()
+
+            Items.god.enabled = false
+            print(string.format("god: above-floor=%s below-floor=%s",
+                tostring(healedAboveFloor), tostring(healedBelowFloor)))
+            if healedAboveFloor or not healedBelowFloor then failures += 1 end
+        else
+            failures += 1
+            print("GOD FAIL: no humanoid")
+        end
+
+        -- Twado: read the want, feed it
+        local Pet = require("features/pet")
+        local wants = Pet.wants()
+        print("twado wants: " .. (#wants > 0 and table.concat(wants, ",") or "nothing"))
+        if #wants == 0 then
+            failures += 1
+            print("PET FAIL: want not detected")
+        else
+            local fed, why = Pet.try_feed()
+            print("twado feed: " .. tostring(fed) .. " (" .. tostring(why) .. ")")
+            if not fed then failures += 1 end
+        end
         return failures
     end)
 

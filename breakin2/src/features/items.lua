@@ -19,6 +19,7 @@
 -- makes the UI honest - a button that says "listo" only after the tool exists.
 
 local Net = require("core/net")
+local U = require("core/util")
 
 local Items = {}
 
@@ -177,8 +178,39 @@ local function fire_food(id)
     return Net.fire_wait("Vending", 3, strip(id), "Food", player_name(), 1)
 end
 
+-- Weapons are the one route nobody agrees on. Every public script fires
+-- Vending(3, name, "Weapons", X, 1) but X is written differently in each:
+-- the player's name, the Player object, or nothing at all. Rather than pick one
+-- and hope, the variants are tried in order and the one that produced a tool is
+-- cached - so the first weapon costs a few extra calls and every later one is a
+-- single fire.
+local WEAPON_VARIANTS = {
+    { label = "name", args = function(id) return 3, strip(id), "Weapons", player_name(), 1 end },
+    { label = "player", args = function(id) return 3, strip(id), "Weapons", Net.Player, 1 end },
+    { label = "no-count", args = function(id) return 3, strip(id), "Weapons", player_name() end },
+    { label = "bare", args = function(id) return 3, strip(id), "Weapons" end },
+}
+
+Items.weapon_variant = nil   -- remembered once one of them works
+Items.weapon_variant_log = {} -- label -> "ok" | "nothing", for the UI
+
 local function fire_weapon(id)
-    return Net.fire_wait("Vending", 3, strip(id), "Weapons", player_name(), 1)
+    if Items.weapon_variant then
+        local v = WEAPON_VARIANTS[Items.weapon_variant]
+        return Net.fire_wait("Vending", v.args(id))
+    end
+    for index, v in ipairs(WEAPON_VARIANTS) do
+        local fired = Net.fire_wait("Vending", v.args(id))
+        if fired and Items.await(id, 0.7) then
+            Items.weapon_variant = index
+            Items.weapon_variant_log[v.label] = "ok"
+            U.log("weapon variant", v.label)
+            return true
+        end
+        Items.weapon_variant_log[v.label] = fired and "nothing" or "not fired"
+        task.wait(Net.gap_of("Vending") + 0.05)
+    end
+    return false
 end
 
 local function fire_armor()
@@ -211,9 +243,15 @@ local ATTEMPTS = {
 function Items.obtain(id, timeout)
     local entry = byId[id]
     if not entry then return false, "unknown item" end
-    if Items.has(id) and entry.group ~= "armas" then
+    if Items.has(id) then
         -- already holding it; giving again is how duplicates are made, so skip
         return true, "already held"
+    end
+
+    if entry.route == "weapon" then
+        local ok = fire_weapon(id)
+        if ok then return true, "weapon (" .. WEAPON_VARIANTS[Items.weapon_variant].label .. ")" end
+        return false, "ninguna variante de Vending entrego el arma"
     end
 
     local reasons = {}
@@ -262,6 +300,22 @@ function Items.unequip_all()
         if t:IsA("Tool") then pcall(function() t.Parent = bag end) end
     end
     return true
+end
+
+-- Every tool the character or backpack holds, de-duplicated and sorted, so the
+-- menu does not have to walk the instances itself.
+function Items.held()
+    local out, seen = {}, {}
+    for _, box in ipairs(containers()) do
+        for _, child in ipairs(box:GetChildren()) do
+            if child:IsA("Tool") and not seen[child.Name] then
+                seen[child.Name] = true
+                table.insert(out, child.Name)
+            end
+        end
+    end
+    table.sort(out)
+    return out
 end
 
 -- ── bulk ────────────────────────────────────────────────────────────────────
@@ -323,11 +377,69 @@ function Items.eat(id)
     return ok
 end
 
+-- Energy is the game's health bar: 200 max, 0 is instant death, and every
+-- source agrees on the remote shape -
+--     Events.Energy:FireServer(amount, foodName)
+-- with 25 for a Pizza, 75 for a Golden Pizza and 999 for a Golden Apple
+-- (the fandom wiki's numbers, and the same ones the working scripts send).
+-- Nobody publishes a cap, so the amount is kept at a value the game itself
+-- heals for; a made-up 1e9 is what gets a remote rejected.
+function Items.energy(amount, food)
+    return Net.fire("Energy", amount, food or "Pizza")
+end
+
 function Items.heal_self()
+    -- the real thing first: eat the food, so the tool's own logic runs
     if Items.eat("Pizza") then return true end
-    -- fallback: the energy remote the older scripts use for a top-up
-    if Net.fire("Energy", 25, "Pizza") then return true end
+    if Items.energy(25, "Pizza") then return true end
     return false
+end
+
+-- Semi-godmode: an Energy call whenever health drops below a floor. "Semi" is
+-- literal - it keeps you alive through a wave without pretending to be
+-- invulnerable, and it is a third of the refresh rate the spam scripts use
+-- (they fire every frame, which is exactly how a remote gets a player kicked).
+-- Big heals are spaced; the small top-up only fires when it is needed.
+Items.god = {
+    enabled = false,
+    floor = 60,        -- heal when the humanoid drops under this
+    amount = 25,       -- pizza tier
+    food = "Pizza",
+    interval = 0.6,
+    heals = 0,
+}
+local last_god_heal = nil   -- nil means "never healed yet", not "healed at t=0"
+
+function Items.health()
+    local hum = Net.humanoid()
+    if not hum then return nil end
+    return hum.Health, hum.MaxHealth
+end
+
+function Items.god_tick()
+    if not Items.god.enabled then return false end
+    local hp = Items.health()
+    if not hp then return false end
+    local now = os.clock or tick
+    if hp > Items.god.floor then return false end
+    if last_god_heal and (now() - last_god_heal) < Items.god.interval then return false end
+    if not Net.fire("Energy", Items.god.amount, Items.god.food) then return false end
+    last_god_heal = now()
+    Items.god.heals = Items.god.heals + 1
+    return true
+end
+
+function Items.god_start()
+    Items.god.enabled = true
+    U.loop("god", Items.god.interval, function()
+        if not Items.god.enabled then U.stop("god"); return end
+        Items.god_tick()
+    end)
+end
+
+function Items.god_stop()
+    Items.god.enabled = false
+    U.stop("god")
 end
 
 -- Heal everyone: the server only trusts players who are actually holding a

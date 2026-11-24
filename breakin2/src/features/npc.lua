@@ -8,6 +8,7 @@
 
 local Net = require("core/net")
 local Items = require("features/items")
+local Pet = require("features/pet")
 local Game = require("core/game")
 local U = require("core/util")
 
@@ -39,20 +40,12 @@ function Npc.detective()
     return Net.fire("LouiseGive", 2)
 end
 
--- Twado wants one of a rotating set of foods; the GUI circles say which.
--- Asking the game beats guessing, so the wanted item is read first and the
--- first match is fed.
+-- Twado is handled by features/pet.lua, which reads both UI sources and can
+-- also watch him on its own. This stays as the one-shot step for the NPC tab.
 function Npc.twado()
-    local wants = Items.dog_wants()
-    if #wants == 0 then
-        U.notify("Twado", "no hay comida marcada todavia")
-        return false
-    end
-    for _, want in ipairs(wants) do
-        if Items.feed_dog(want) then return true end
-        task.wait(0.2)
-    end
-    return false
+    local ok, why = Pet.try_feed()
+    if not ok then U.notify("Twado", tostring(why)) end
+    return ok
 end
 
 -- FallenTrees holds the road mission props; RoadMissionEvent reads
