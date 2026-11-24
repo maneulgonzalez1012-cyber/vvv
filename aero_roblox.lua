@@ -32,6 +32,15 @@ local Teams = game:GetService("Teams")
 local CoreGui = game:GetService("CoreGui")
 local lp = Players.LocalPlayer
 
+-- Single-instance guard: loader.lua clears AERO_FORCE_RELOAD before fetching.
+do
+    local E = _G
+    local ok, g = pcall(function() return getgenv() end)
+    if ok and type(g) == "table" then E = g end
+    if E.AERO_LOADED then return end
+    E.AERO_LOADED = true
+end
+
 -- Executor globals. Absent on stock Roblox, present on Synapse / Script-Ware /
 -- Fluxus. Reading a missing global is nil; every use below degrades gracefully.
 local ENV = _G
