@@ -519,8 +519,10 @@ function Hitbox:tick()
 					local st = self.state[char]
 					if not st or st.mult ~= mult or st.mode ~= mode or st.builtAt + 2 < now then
 						st = self:build(char, mult)
-					end
-					if st.n > 0 then
+						if st.n > 0 then
+							pcall(applyState, st, noCollide)
+						end
+					elseif st.n > 0 then
 						-- un pcall por personaje, no por part
 						if not pcall(applyState, st, noCollide) then
 							self.state[char] = nil
