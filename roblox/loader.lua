@@ -14,7 +14,7 @@ local RAW    = "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv"
 local FILE   = "roblox/vanta_shooter.lua"
 local REFS   = {
 	"main",
-	"2369e3936cb5d490b45867a26b03bb0fed5b7e29",   -- vanta_shooter.lua
+	"3b5f77d189cc200d1110ef443470133b9f99494d",   -- vanta_shooter.lua
 }
 
 local bust = "?t=" .. tostring(os.time()) .. tostring(math.random(100000, 999999))
