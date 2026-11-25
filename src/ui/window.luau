@@ -11,6 +11,7 @@
 ]]
 
 local Config = require(script.Parent.Parent.shared.config)
+local Hitbox = require(script.Parent.Parent.modules.hitbox) -- MODES
 local PlayersLib = require(script.Parent.Parent.shared.players)
 
 local Window = {}
@@ -104,23 +105,56 @@ function Window.build(Rayfield, state, api)
 	local hit = tabs.hit
 	hit:CreateSection({ name = "Expander" })
 	b(hit:CreateToggle({ name = "Enabled", flag = "hitEnabled", value = state.hitEnabled }), "hitEnabled")
-	b(hit:CreateToggle({ name = "Root part only", flag = "hitRootOnly", value = state.hitRootOnly }), "hitRootOnly")
 
-	local hRange, hInc = Config.slider("hitScale")
-	b(hit:CreateSlider({
-		name = "Scale",
-		flag = "hitScale",
-		range = hRange,
-		increment = hInc,
-		value = state.hitScale,
-		suffix = "x",
-	}), "hitScale")
+	b(hit:CreateDropdown({
+		name = "Target",
+		flag = "hitMode",
+		options = Hitbox.MODES,
+		value = state.hitMode,
+	}), "hitMode")
+
+	hit:CreateSection({ name = "Per axis" })
+	local axes = { "X", "Y", "Z" }
+	for _, axis in ipairs(axes) do
+		local key = "hitScale" .. axis
+		local range, inc = Config.slider(key)
+		b(hit:CreateSlider({
+			name = "Scale " .. axis,
+			flag = key,
+			range = range,
+			increment = inc,
+			value = state[key],
+			suffix = "x",
+		}), key)
+	end
+
+	hit:CreateButton({
+		name = "Uniformes",
+		callback = function()
+			-- copia X a Y y Z, y mueve la UI sin volver a disparar callbacks
+			local x = state.hitScaleX
+			state.hitScaleY = x
+			state.hitScaleZ = x
+			if flags.hitScaleY then
+				flags.hitScaleY:Set(x, true)
+			end
+			if flags.hitScaleZ then
+				flags.hitScaleZ:Set(x, true)
+			end
+		end,
+	})
+
+	b(hit:CreateToggle({
+		name = "Debug boxes",
+		flag = "hitVisual",
+		value = state.hitVisual,
+	}), "hitVisual")
 
 	hit:CreateText({
 		name = "Scope",
-		text = "El Size se cambia solo en tu cliente: las partes son del otro jugador. "
-			.. "Funciona donde el hit detection corre del lado del cliente; en shooters "
-			.. "validados por servidor no hace nada. Se restaura al apagar y en unload.",
+		text = "El Size base se guarda una vez por parte y se restaura al apagar, "
+			.. "al morir el objetivo y al salir del workspace. Las partes nuevas las "
+			.. "captura ChildAdded, no un barrido por timer.",
 	})
 
 	------------------------------------------------------------------
@@ -188,6 +222,11 @@ function Window.build(Rayfield, state, api)
 		text = "Esquina superior derecha, 250 studs de radio, gira con la vista.",
 	})
 
+	local status = misc:CreateText({
+		name = "Status",
+		text = "midiendo...",
+	})
+
 	------------------------------------------------------------------
 	local cfg = tabs.cfg
 	cfg:CreateSection({ name = "Configuration" })
@@ -225,7 +264,7 @@ function Window.build(Rayfield, state, api)
 
 	cfg:CreateText({ name = "Info", text = api.infoText or "" })
 
-	return { window = window, flags = flags, tabs = tabs }
+	return { window = window, flags = flags, tabs = tabs, status = status }
 end
 
 -- Rayfield puede aplicar el archivo guardado después de crear los elementos

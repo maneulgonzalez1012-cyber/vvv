@@ -7,94 +7,93 @@ UI: **Rayfield Gen 2**.
 loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv/refs/heads/arena/b9dbd63d-vvv/loader.lua"))()
 ```
 
-El menú es el de Rayfield: pill colapsado, la tecla se cambia en su pestaña de Settings.
-Todo arranca apagado.
+Si algo no responde, la pestaña **Misc → Status** dice qué está viendo el script en ese
+segundo: renderer, jugadores, cajas de ESP, partes infladas y si hay cámara.
 
-> El loader vive en esta branch, no en `main`. Una URL con `/main/` devuelve 404 y
-> `loadstring` recibe nil — el loader ahora detecta ese caso y te lo dice en vez de
-> morir con un error seco.
+## Render
+
+**ScreenGui, no Drawing.** `Drawing` no existe o no pinta nada en varios executors,
+sobre todo en móvil — antes el ESP intentaba usarla y se quedaba en blanco. Ahora todo se
+dibuja con `Frame` + `UIStroke` + `TextLabel`, que funcionan en cualquier executor y en
+cualquier plataforma. El gui va a `gethui()` → `CoreGui` → `PlayerGui`, en ese orden.
 
 ## Estructura
 
-El repo guarda el proyecto **modular** en `src/`; `Astral.lua` es un build generado.
+Proyecto modular en `src/`; `Astral.lua` es el build de una pieza que carga el loader.
 
 ```
 src/
-  init.luau              entry point: estado, módulos, loop, unload
+  init.luau              estado, módulos, loop, unload
   shared/
-    config.luau          nombres, rangos de sliders, defaults, versión
+    config.luau          nombres, rangos, defaults, versión
     mathx.luau           proyección de caja, clamp, lerp de color
-    players.luau         quién es objetivo válido + resolución de huesos
-    renderer.luau        Drawing o ScreenGui, mismo contrato
+    players.luau         objetivo válido, huesos, cache de jugadores por frame
+    renderer.luau        ScreenGui
   modules/
-    esp.luau             pool de objetos por jugador, caja/vida/nombre/distancia/tracer
-    hitbox.luau          expansión de Size con original guardado y throttling
-    aim.luau             selección por FOV + giro de cámara con suavizado exponencial
-    radar.luau           2D XZ relativo a la cámara, esquina superior derecha
-  ui/
-    window.luau          ventana de Rayfield + tabla de flags
-Astral.lua               build de una pieza (esto es lo que carga el loader)
+    esp.luau             pool por jugador: caja, relleno, vida, nombre, distancia, tracer
+    hitbox.luau          expansor por eje con hooks y restore
+    hitdebug.luau        cajas de alambre sobre las partes infladas
+    aim.luau             FOV + giro de cámara suavizado
+    radar.luau           2D XZ relativo a la cámara
+    diag.luau            el renglón de Status
+  ui/window.luau         ventana de Rayfield + flags
+Astral.lua               build (esto carga el loader)
 loader.lua               fetch + compile + reemplazo de instancia
 build.py                 src/ -> Astral.lua
 ```
 
-Rebuild:
+Rebuild: `python3 build.py` (reescribe cada `require(script.…)` a un lookup en tabla).
 
-```
-python3 build.py
-```
+## Hitbox
 
-`build.py` reescribe cada `require(script.…)` a un lookup en una tabla de módulos, así
-el archivo final no necesita ModuleScripts ni acceso al disco en runtime.
+- **escala independiente por eje** (X / Y / Z) y botón `Uniformes` para copiar X a Y y Z
+- **alcance por modo**: `all`, `torso`, `head`, `root`
+- el `Size` base se captura **una vez por parte** y nunca se sobreescribe; cambiar la escala
+  compone sobre el original, no sobre lo ya inflado
+- al cambiar de modo o escala, las partes de la config anterior se restauran antes de
+  aplicar la nueva — cambiar de `all` a `head` no deja los brazos gigantes
+- **hooks por personaje** en vez de barrido por timer: `ChildAdded` mete las partes que
+  llegan después, `Humanoid.Died` restaura en el acto, `AncestryChanged` suelta el char
+  cuando sale del workspace
+- `Debug boxes` dibuja un alambre sobre cada parte inflada: si no aparece nada, el problema
+  es el juego (validación en servidor) o el personaje, no el script
 
-## Features
+Sigue siendo local: las partes las posee el otro cliente.
 
-**ESP**
+## ESP
+
 - caja desde las 8 esquinas del bounding box → hull en pantalla (no se estira al girar)
-- relleno, barra de vida rojo→verde, nombre, distancia
-- tracer desde el borde inferior
+- relleno, barra de vida rojo→verde, nombre, distancia, tracer
 - team check por el objeto `Team` (no `TeamColor`, que es blanco sin equipos)
-- slider de distancia máxima y tres color pickers
+- distancia máxima y tres color pickers
 
-**Hitbox**
-- 1x–10x sobre las partes del cuerpo (R15 completo, R6 reducido)
-- opción root-only
-- `Size` original guardado una vez y restaurado al apagar, al recargar config y en unload
-- re-aplicado cada 0.5 s, con techo de jugadores por pase
+## Aim
 
-**Aim**
-- mantén click derecho; elige el hueso más cercano al centro dentro del FOV
-- FOV en grados convertido a píxeles con el `FieldOfView` real de la cámara
-- suavizado exponencial independiente del framerate, dt clampado
-- wall check opcional con un solo raycast, filtrado contra tu personaje y el objetivo
-- círculo de FOV dibujado en pantalla
+Mantén click derecho. Elige el hueso más cercano al centro dentro del FOV (convertido a
+píxeles con el `FieldOfView` real), gira la cámara con suavizado exponencial independiente
+del framerate, wall check opcional de un raycast, y dibuja el círculo del FOV.
 
-**Radar**
-- 250 studs de radio, gira con la vista (proyección sobre forward/right de la cámara)
+## Config
 
-**Config**
-- Rayfield guarda y restaura solo: toggles, sliders, dropdowns, colores y posición
-- `Astral/Astral.json` en la carpeta del executor
-- botones Save / Load / Restore hitboxes / Unload
+Rayfield guarda y restaura solo (toggles, sliders, dropdowns, colores, posición de la
+ventana) en `Astral/Astral.json`.
 
 ## Límites reales
 
-- El hitbox cambia **solo en tu cliente**: las partes las posee el otro jugador. Funciona
-  donde el hit detection corre del lado del cliente, no en shooters validados por servidor.
+- El hitbox solo cambia el tamaño en tu cliente: sirve donde el hit detection corre del
+  lado del cliente.
 - El aim escribe `Camera.CFrame` desde `RenderStepped`; los scripts de cámara de Roblox
   también escriben cada frame, así que con `smooth` bajo el pulso se nota.
-- ESP usa `Drawing` si existe; si no, cae a un `ScreenGui` en `CoreGui`/`PlayerGui`.
 
 ## Anti-cheat
 
-Roblox corre **Hyperion (Byfron)** en Windows. Los executors que funcionan lo bypassean, y
-eso está permanentemente en la mira de Roblox: el riesgo es sobre tu cuenta, no sobre el script.
+Roblox corre **Hyperion (Byfron)** en Windows. La detección cae sobre la cuenta, no sobre el
+script.
 
 ## Verificado
 
-- `luau-compile` limpio en los 10 módulos, en `Astral.lua` y en `loader.lua`
-- harness que emula Roblox + un stub de la API de Rayfield Gen 2, en 8 escenarios:
-  arranque y elementos de UI, ESP con team check y distancia, hitbox aplicando y
-  restaurando en dos escalas, radar, aim (FOV, bind, wall check, dt gigante),
-  doble carga, config restaurada sin callbacks, fallos de arranque y backend ScreenGui
-- no lo corrí en el cliente real de Roblox; eso solo lo compruebas tú
+`luau-compile` limpio en los 12 módulos, en `Astral.lua` y en `loader.lua`. Harness con
+Roblox emulado (instancias, señales, parentesco, `Humanoid.Died`, `ChildAdded`) y stub de
+Rayfield Gen 2, en 8 escenarios: arranque y UI, ESP con filtros, hitbox por eje y por modo
+con restore en muerte/respawn/salida/unload, debug de hitbox, radar, status, aim con y sin
+bind, y doble carga. En cliente real no lo corrí.

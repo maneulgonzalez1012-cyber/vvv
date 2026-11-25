@@ -27,6 +27,8 @@ FILES = [
     "modules/hitbox",
     "modules/aim",
     "modules/radar",
+    "modules/hitdebug",
+    "modules/diag",
     "ui/window",
     "init",
 ]

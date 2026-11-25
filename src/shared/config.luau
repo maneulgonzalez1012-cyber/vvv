@@ -9,21 +9,18 @@
 
 local Config = {}
 
-Config.version = "2.0.0"
+Config.version = "2.1.0"
 Config.name = "Astral"
 Config.subtitle = "esp + hitbox + aim"
 Config.configFile = "Astral"
 Config.theme = "amethyst"
 
--- rate limit del hitbox: cada cuánto se re-aplica el Size a las partes
-Config.hitboxInterval = 0.5
--- techo de jugadores por pase: un servidor de 60 no te clava el frame
-Config.hitboxMaxPlayers = 30
-
 -- { min, max, incremento } de cada slider
 Config.ranges = {
 	espMaxDistance = { 50, 5000, 50 },
-	hitScale = { 1, 10, 0.5 },
+	hitScaleX = { 1, 10, 0.5 },
+	hitScaleY = { 1, 10, 0.5 },
+	hitScaleZ = { 1, 10, 0.5 },
 	aimFov = { 10, 360, 1 },
 	aimSmooth = { 0, 20, 0.5 },
 	aimFovCircleRadius = { 20, 400, 1 },
@@ -51,8 +48,11 @@ Config.defaults = {
 
 	-- hitbox
 	hitEnabled = false,
-	hitRootOnly = false,
-	hitScale = 2.0,
+	hitMode = "all",
+	hitScaleX = 2.0,
+	hitScaleY = 2.0,
+	hitScaleZ = 2.0,
+	hitVisual = true,
 
 	-- aim
 	aimEnabled = false,

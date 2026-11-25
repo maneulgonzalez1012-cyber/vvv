@@ -37,21 +37,18 @@ __modules["shared/config"] = function()
 
 local Config = {}
 
-Config.version = "2.0.0"
+Config.version = "2.1.0"
 Config.name = "Astral"
 Config.subtitle = "esp + hitbox + aim"
 Config.configFile = "Astral"
 Config.theme = "amethyst"
 
--- rate limit del hitbox: cada cuánto se re-aplica el Size a las partes
-Config.hitboxInterval = 0.5
--- techo de jugadores por pase: un servidor de 60 no te clava el frame
-Config.hitboxMaxPlayers = 30
-
 -- { min, max, incremento } de cada slider
 Config.ranges = {
 	espMaxDistance = { 50, 5000, 50 },
-	hitScale = { 1, 10, 0.5 },
+	hitScaleX = { 1, 10, 0.5 },
+	hitScaleY = { 1, 10, 0.5 },
+	hitScaleZ = { 1, 10, 0.5 },
 	aimFov = { 10, 360, 1 },
 	aimSmooth = { 0, 20, 0.5 },
 	aimFovCircleRadius = { 20, 400, 1 },
@@ -79,8 +76,11 @@ Config.defaults = {
 
 	-- hitbox
 	hitEnabled = false,
-	hitRootOnly = false,
-	hitScale = 2.0,
+	hitMode = "all",
+	hitScaleX = 2.0,
+	hitScaleY = 2.0,
+	hitScaleZ = 2.0,
+	hitVisual = true,
 
 	-- aim
 	aimEnabled = false,
@@ -286,24 +286,33 @@ __modules["shared/renderer"] = function()
 --[[
 	Astral :: shared/renderer
 
-	fachada de dibujo. dos backends con el mismo contrato:
+	un solo backend: ScreenGui + TextLabel/Frame + UIStroke. funciona en
+	cualquier executor y en cualquier dispositivo, a diferencia de la API
+	Drawing (que en varios executors móviles existe pero no pinta nada).
 
-		newRect() / newText() / newCircle()  crean el objeto
+	contrato:
+		newRect() / newText() / newCircle()
 		rect(o, x, y, w, h, color, filled, thickness, transparency, visible)
 		text(o, str, x, y, size, color, visible)
 		circle(o, x, y, radius, color, thickness, filled, visible)
 		hide(o) / destroy(o)
 
-	coordenadas: píxeles, origen arriba-izquierda del viewport, que es lo que
-	devuelve cam:WorldToViewportPoint y mide cam.ViewportSize.
+	coordenadas: píxeles, origen arriba-izquierda del viewport (lo que devuelve
+	cam:WorldToViewportPoint y mide cam.ViewportSize).
 
-	Drawing usa ese origen tal cual. PlayerGui NO: si IgnoreGuiInset está en
-	false, el gui empieza debajo de la topbar y las Y cuadran con el viewport;
-	con true se dibujaría 36px arriba. CoreGui y gethui() ya cubren la pantalla
-	completa, así que ahí IgnoreGuiInset se queda en true.
+	el gui vive en gethui() si existe → CoreGui → PlayerGui. con PlayerGui se
+	apaga IgnoreGuiInset porque el gui arranca bajo la topbar, y así la Y del
+	viewport cuadra sin corregir a mano.
+
+	el inset real se mide al arrancar (GuiService.TopbarInset) y se expone como
+	Renderer.inset, por si el juego lo cambia; los módulos no lo usan porque
+	PlayerGui ya lo compensa.
 ]]
 
 local Renderer = {}
+
+local GuiService = game:GetService("GuiService")
+local Players = game:GetService("Players")
 
 local function safeCall(fn, ...)
 	local ok, res = pcall(fn, ...)
@@ -314,103 +323,9 @@ local function safeCall(fn, ...)
 end
 
 ----------------------------------------------------------------------
--- backend: Drawing
+-- padre del gui
 ----------------------------------------------------------------------
-local function drawingBackend()
-	local fonts = Drawing.Fonts
-	local font = 2
-	if fonts then
-		font = fonts.Plex or fonts.SourceSans or 2
-	end
-
-	local function make(class)
-		return safeCall(function()
-			local o = Drawing.new(class)
-			if o then
-				o.Visible = false
-			end
-			return o
-		end)
-	end
-
-	local function set(o, key, value)
-		if o then
-			pcall(function()
-				o[key] = value
-			end)
-		end
-	end
-
-	return {
-		name = "Drawing",
-		newRect = function()
-			return make("Square")
-		end,
-		newText = function()
-			return make("Text")
-		end,
-		newCircle = function()
-			return make("Circle")
-		end,
-		rect = function(o, x, y, w, h, color, filled, thickness, transparency, visible)
-			if not o then
-				return
-			end
-			set(o, "Position", Vector2.new(x, y))
-			set(o, "Size", Vector2.new(w, h))
-			set(o, "Color", color)
-			set(o, "Filled", filled)
-			set(o, "Thickness", thickness)
-			set(o, "Transparency", transparency)
-			set(o, "Visible", visible)
-		end,
-		text = function(o, str, x, y, size, color, visible)
-			if not o then
-				return
-			end
-			set(o, "Text", str)
-			set(o, "Position", Vector2.new(x, y))
-			set(o, "Size", size)
-			set(o, "Color", color)
-			set(o, "Center", true)
-			set(o, "Outline", true)
-			set(o, "Font", font)
-			set(o, "Visible", visible)
-		end,
-		circle = function(o, x, y, radius, color, thickness, filled, visible)
-			if not o then
-				return
-			end
-			set(o, "Position", Vector2.new(x, y))
-			set(o, "Radius", radius)
-			set(o, "Color", color)
-			set(o, "Thickness", thickness)
-			set(o, "Filled", filled)
-			set(o, "Visible", visible)
-		end,
-		hide = function(o)
-			set(o, "Visible", false)
-		end,
-		destroy = function(o)
-			if o then
-				pcall(function()
-					o:Remove()
-				end)
-			end
-		end,
-	}
-end
-
-----------------------------------------------------------------------
--- backend: ScreenGui (executors sin Drawing)
-----------------------------------------------------------------------
-local function guiBackend()
-	local parent
-	local underPlayerGui = false
-	-- el servicio, no el módulo de jugadores: aquí solo se necesita el
-	-- LocalPlayer para llegar a PlayerGui
-	local playerSvc = game:GetService("Players")
-
+local function pickParent()
 	local probes = {
 		{ fn = function()
 			return gethui()
@@ -419,22 +334,24 @@ local function guiBackend()
 			return game:GetService("CoreGui")
 		end },
 		{ fn = function()
-			local lp = playerSvc.LocalPlayer
-			if not lp then
-				return nil
-			end
-			return lp:WaitForChild("PlayerGui", 5)
+			return Players.LocalPlayer:WaitForChild("PlayerGui", 5)
 		end, playerGui = true },
 	}
 
 	for _, probe in ipairs(probes) do
-		parent = safeCall(probe.fn)
+		local parent = safeCall(probe.fn)
 		if parent then
-			underPlayerGui = probe.playerGui == true
-			break
+			return parent, probe.playerGui == true
 		end
 	end
+	return nil, false
+end
 
+----------------------------------------------------------------------
+-- construcción
+----------------------------------------------------------------------
+function Renderer.build()
+	local parent, underPlayerGui = pickParent()
 	if not parent then
 		return nil
 	end
@@ -445,12 +362,18 @@ local function guiBackend()
 	if not gui then
 		return nil
 	end
+
 	gui.Name = "Astral"
 	gui.ResetOnSpawn = false
 	gui.DisplayOrder = 999
-	-- true en CoreGui/gethui (pantalla completa), false en PlayerGui (bajo la
-	-- topbar) para que el origen coincida con el del viewport
 	gui.IgnoreGuiInset = not underPlayerGui
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	-- sin esto, un gui dentro de PlayerGui se borra al respawnar aunque
+	-- ResetOnSpawn sea false en algunos executors
+	pcall(function()
+		gui.ClipToDeviceSafeArea = false
+	end)
+
 	if not safeCall(function()
 		gui.Parent = parent
 		return true
@@ -460,10 +383,16 @@ local function guiBackend()
 	end
 
 	local strokes = setmetatable({}, { __mode = "k" })
+	local shadows = setmetatable({}, { __mode = "k" })
 	local corners = setmetatable({}, { __mode = "k" })
 
 	local function make(class)
-		local o = Instance.new(class)
+		local o = safeCall(function()
+			return Instance.new(class)
+		end)
+		if not o then
+			return nil
+		end
 		o.BorderSizePixel = 0
 		o.BackgroundTransparency = 1
 		o.Visible = false
@@ -474,10 +403,38 @@ local function guiBackend()
 	local function strokeOf(o)
 		local s = strokes[o]
 		if not s then
-			s = Instance.new("UIStroke")
-			s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			s = safeCall(function()
+				return Instance.new("UIStroke")
+			end)
+			if not s then
+				return nil
+			end
+			pcall(function()
+				s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			end)
 			s.Parent = o
 			strokes[o] = s
+		end
+		return s
+	end
+
+	local function shadowOf(o)
+		local s = shadows[o]
+		if not s then
+			s = safeCall(function()
+				return Instance.new("UIStroke")
+			end)
+			if not s then
+				return nil
+			end
+			pcall(function()
+				s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+				s.Thickness = 1
+				s.Color = Color3.new(0, 0, 0)
+				s.Transparency = 0.4
+			end)
+			s.Parent = o
+			shadows[o] = s
 		end
 		return s
 	end
@@ -489,113 +446,124 @@ local function guiBackend()
 		if s then
 			s.Enabled = false
 		end
+		local d = shadows[o]
+		if d then
+			d.Enabled = false
+		end
 	end
 
 	local function outline(o, color, thickness)
 		o.BackgroundTransparency = 1
 		local s = strokeOf(o)
-		s.Enabled = true
-		s.Color = color
-		s.Thickness = math.max(thickness or 1, 1)
+		if s then
+			s.Enabled = true
+			s.Color = color
+			s.Thickness = math.max(thickness or 1, 1)
+		end
 	end
 
-	return {
+	local api = {
 		name = "ScreenGui",
 		gui = gui,
-		newRect = function()
-			return make("Frame")
-		end,
-		newText = function()
-			local t = make("TextLabel")
-			t.Font = Enum.Font.Gotham
-			t.TextSize = 13
-			t.TextXAlignment = Enum.TextXAlignment.Center
-			t.TextYAlignment = Enum.TextYAlignment.Top
-			t.TextStrokeTransparency = 0.25
-			t.AnchorPoint = Vector2.new(0.5, 0)
-			t.TextColor3 = Color3.new(1, 1, 1)
-			return t
-		end,
-		newCircle = function()
-			local c = make("Frame")
-			local corner = Instance.new("UICorner")
+		-- padding real de la topbar en este cliente; 0 cuando el gui cubre
+		-- toda la pantalla
+		inset = 0,
+	}
+
+	pcall(function()
+		api.inset = GuiService.TopbarInset and GuiService.TopbarInset.Height or 0
+	end)
+
+	function api.newRect()
+		return make("Frame")
+	end
+
+	function api.newText()
+		local t = make("TextLabel")
+		if not t then
+			return nil
+		end
+		t.Font = Enum.Font.Gotham
+		t.TextSize = 13
+		t.TextXAlignment = Enum.TextXAlignment.Center
+		t.TextYAlignment = Enum.TextYAlignment.Top
+		t.TextStrokeTransparency = 0.2
+		t.AnchorPoint = Vector2.new(0.5, 0)
+		t.TextColor3 = Color3.new(1, 1, 1)
+		return t
+	end
+
+	function api.newCircle()
+		local c = make("Frame")
+		if not c then
+			return nil
+		end
+		local corner = safeCall(function()
+			return Instance.new("UICorner")
+		end)
+		if corner then
 			corner.CornerRadius = UDim.new(1, 0)
 			corner.Parent = c
 			corners[c] = corner
-			return c
-		end,
-		rect = function(o, x, y, w, h, color, filled, thickness, transparency, visible)
-			if not o then
-				return
-			end
-			o.Position = UDim2.fromOffset(x, y)
-			o.Size = UDim2.fromOffset(math.max(w, 1), math.max(h, 1))
-			o.Visible = visible
-			if filled then
-				fill(o, color, transparency)
-			else
-				outline(o, color, thickness)
-			end
-		end,
-		text = function(o, str, x, y, size, color, visible)
-			if not o then
-				return
-			end
-			o.Text = str
-			o.Position = UDim2.fromOffset(x, y)
-			o.TextSize = size
-			o.TextColor3 = color
-			o.Visible = visible
-		end,
-		circle = function(o, x, y, radius, color, thickness, filled, visible)
-			if not o then
-				return
-			end
-			o.AnchorPoint = Vector2.new(0.5, 0.5)
-			o.Position = UDim2.fromOffset(x, y)
-			o.Size = UDim2.fromOffset(radius * 2, radius * 2)
-			o.Visible = visible
-			if filled then
-				fill(o, color, 0.5)
-			else
-				outline(o, color, thickness)
-				local corner = corners[o]
-				if corner then
-					corner.CornerRadius = UDim.new(1, 0)
-				end
-			end
-		end,
-		hide = function(o)
-			if o then
-				o.Visible = false
-			end
-		end,
-		destroy = function(o)
-			if o then
-				safeCall(function()
-					o:Destroy()
-				end)
-			end
-		end,
-	}
-end
+		end
+		return c
+	end
 
-----------------------------------------------------------------------
--- selección
-----------------------------------------------------------------------
-function Renderer.pick()
-	if Drawing and Drawing.new then
-		local probe = safeCall(function()
-			return Drawing.new("Square")
-		end)
-		if probe then
-			pcall(function()
-				probe:Remove()
-			end)
-			return drawingBackend()
+	function api.rect(o, x, y, w, h, color, filled, thickness, transparency, visible)
+		if not o then
+			return
+		end
+		o.Position = UDim2.fromOffset(x, y)
+		o.Size = UDim2.fromOffset(math.max(w, 1), math.max(h, 1))
+		o.Visible = visible
+		if filled then
+			fill(o, color, transparency)
+		else
+			outline(o, color, thickness)
 		end
 	end
-	return guiBackend()
+
+	function api.text(o, str, x, y, size, color, visible)
+		if not o then
+			return
+		end
+		o.Text = str
+		o.Position = UDim2.fromOffset(x, y)
+		o.TextSize = size
+		o.TextColor3 = color
+		o.Visible = visible
+	end
+
+	function api.circle(o, x, y, radius, color, thickness, filled, visible)
+		if not o then
+			return
+		end
+		o.AnchorPoint = Vector2.new(0.5, 0.5)
+		o.Position = UDim2.fromOffset(x, y)
+		o.Size = UDim2.fromOffset(radius * 2, radius * 2)
+		o.Visible = visible
+		if filled then
+			fill(o, color, 0.55)
+		else
+			outline(o, color, thickness)
+		end
+	end
+
+	function api.hide(o)
+		if o then
+			o.Visible = false
+		end
+	end
+
+	function api.destroy(o)
+		if o then
+			safeCall(function()
+				o:Destroy()
+			end)
+		end
+	end
+
+	return api
 end
 
 return Renderer
@@ -632,6 +600,7 @@ function Esp.new(renderer, state)
 	self.state = state
 	self.pool = {}
 	self.anyVisible = false
+	self.drawn = 0
 	self.conn = PlayersLib.service.PlayerRemoving:Connect(function(plr)
 		self:forget(plr)
 	end)
@@ -708,6 +677,7 @@ function Esp:step(cam)
 		if self.anyVisible then
 			self:hideAll()
 		end
+		self.drawn = 0
 		return 0
 	end
 
@@ -787,6 +757,7 @@ function Esp:step(cam)
 	end
 
 	self.anyVisible = drawn > 0
+	self.drawn = drawn
 	return drawn
 end
 
@@ -810,12 +781,17 @@ __modules["modules/hitbox"] = function()
 --[[
 	Astral :: modules/hitbox
 
-	agranda el Size de las partes del personaje en el cliente.
-	las partes las posee el otro jugador: el cambio es local, así que esto
-	sirve donde el hit detection corre del lado del cliente.
+	expansor por eje, con cuatro modos de alcance y hooks por personaje en vez
+	de un barrido por timer:
 
-	el Size original se guarda la primera vez que se ve la parte y nunca se
-	sobreescribe: así cambiar la escala no compone multiplicaciones.
+		ChildAdded en el Character  → las partes que streamean después entran solas
+		Humanoid.Died               → restaura ese char en el acto
+		AncestryChanged en el char  → si sale del workspace, se suelta
+
+	el Size base se captura UNA vez por parte y nunca se pisa, así mover el
+	slider compone sobre el original y no sobre el valor ya inflado.
+
+	todo es local: las partes las posee el otro cliente.
 ]]
 
 local PlayersLib = __require("shared/players")
@@ -823,141 +799,251 @@ local PlayersLib = __require("shared/players")
 local Hitbox = {}
 Hitbox.__index = Hitbox
 
-local BODY_PARTS = {
-	"HumanoidRootPart", "Head", "Torso",
-	"Left Arm", "Right Arm", "Left Leg", "Right Leg",
-	"UpperTorso", "LowerTorso",
-	"LeftUpperArm", "LeftLowerArm", "LeftHand",
-	"RightUpperArm", "RightLowerArm", "RightHand",
-	"LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
-	"RightUpperLeg", "RightLowerLeg", "RightFoot",
+-- orden de preferencia por modo
+local MODES = {
+	all = {
+		"HumanoidRootPart", "Head", "Torso",
+		"Left Arm", "Right Arm", "Left Leg", "Right Leg",
+		"UpperTorso", "LowerTorso",
+		"LeftUpperArm", "LeftLowerArm", "LeftHand",
+		"RightUpperArm", "RightLowerArm", "RightHand",
+		"LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+		"RightUpperLeg", "RightLowerLeg", "RightFoot",
+	},
+	root = { "HumanoidRootPart", "Torso" },
+	torso = { "UpperTorso", "LowerTorso", "Torso", "HumanoidRootPart" },
+	head = { "Head" },
 }
 
-function Hitbox.new(state, limits)
+Hitbox.MODES = { "all", "torso", "head", "root" }
+
+function Hitbox.new()
 	local self = setmetatable({}, Hitbox)
-	self.state = state
-	self.interval = limits.interval or 0.5
-	self.maxPlayers = limits.maxPlayers or 30
-	self.originals = setmetatable({}, { __mode = "k" })
-	self.nextPass = 0
-	self.applied = {}
+	self.bases = setmetatable({}, { __mode = "k" }) -- part -> Vector3 original
+	self.watched = setmetatable({}, { __mode = "k" }) -- char -> true
+	self.conns = {} -- char -> { conexiones }
+	self.live = setmetatable({}, { __mode = "k" }) -- part -> true, lo que tocamos
+	self.dirty = true
+	self.state = nil
 	return self
 end
 
-function Hitbox:restore()
-	for part, size in pairs(self.originals) do
-		if part.Parent then
-			pcall(function()
-				part.Size = size
-			end)
-		end
+-- Rayfield entrega los dropdowns como tabla en single mode; el estado
+-- guarda un string, pero por si alguien escribe la tabla a mano
+local function modeString(v)
+	if type(v) == "table" then
+		return v[1] or "all"
 	end
-	table.clear(self.originals)
-	table.clear(self.applied)
-	self.nextPass = 0
+	if type(v) ~= "string" or MODES[v] == nil then
+		return "all"
+	end
+	return v
 end
 
--- fuerza un pase en el siguiente frame aunque el throttle no lo deje
+function Hitbox:settings()
+	local s = self.state
+	return {
+		enabled = s and s.hitEnabled or false,
+		mode = modeString(s and s.hitMode),
+		visual = s and s.hitVisual ~= false,
+		x = (s and s.hitScaleX) or 2,
+		y = (s and s.hitScaleY) or 2,
+		z = (s and s.hitScaleZ) or 2,
+	}
+end
+
+-- firma de la configuración actual. si cambia (modo o escala), las partes que
+-- quedaron infladas de la config anterior se restauran antes de aplicar la
+-- nueva: sin esto, cambiar de "all" a "head" deja brazos y piernas gigantes
+function Hitbox:fingerprint(cfg)
+	return string.format("%s|%.2f|%.2f|%.2f", cfg.mode, cfg.x, cfg.y, cfg.z)
+end
+
 function Hitbox:invalidate()
-	self.nextPass = 0
+	self.dirty = true
 end
 
-function Hitbox:parts(char, rootOnly)
-	if rootOnly then
-		local root = char:FindFirstChild("HumanoidRootPart")
-		if root and root:IsA("BasePart") then
-			return { root }
-		end
-		return nil
+----------------------------------------------------------------------
+-- restauración
+----------------------------------------------------------------------
+function Hitbox:restorePart(part)
+	local base = self.bases[part]
+	if not base then
+		return
 	end
-
-	local out = {}
-	for i = 1, #BODY_PARTS do
-		local part = char:FindFirstChild(BODY_PARTS[i])
-		if part and part:IsA("BasePart") then
-			out[#out + 1] = part
-		end
+	if part.Parent then
+		pcall(function()
+			part.Size = base
+		end)
 	end
-	if #out == 0 then
-		return nil
-	end
-	return out
+	self.live[part] = nil
 end
 
-function Hitbox:applyTo(char, scale, rootOnly)
-	local parts = self:parts(char, rootOnly)
-	if not parts then
-		return 0
+function Hitbox:restoreAll()
+	for part in pairs(self.live) do
+		self:restorePart(part)
 	end
+	table.clear(self.bases)
+	table.clear(self.live)
+	self.lastPrint = nil
+	self.dirty = true
+end
 
-	local original = self.originals
+----------------------------------------------------------------------
+-- aplicación
+----------------------------------------------------------------------
+function Hitbox:applyTo(char, cfg)
+	local names = MODES[cfg.mode] or MODES.all
+	local bases = self.bases
 	local touched = 0
 
-	for i = 1, #parts do
-		local part = parts[i]
-		local base = original[part]
-		if not base then
-			base = part.Size
-			original[part] = base
+	for i = 1, #names do
+		local part = char:FindFirstChild(names[i])
+		if part and part:IsA("BasePart") then
+			local base = bases[part]
+			if not base then
+				base = part.Size
+				bases[part] = base
+			end
+
+			local target = Vector3.new(base.X * cfg.x, base.Y * cfg.y, base.Z * cfg.z)
+			-- comparar evita escribir Size cada frame: escribir Size despierta
+			-- replicación y física en el motor, y con 15 jugadores se nota
+			if part.Size ~= target then
+				pcall(function()
+					part.Size = target
+				end)
+			end
+			self.live[part] = true
+			touched = touched + 1
 		end
-		local target = base * scale
-		if part.Size ~= target then
-			pcall(function()
-				part.Size = target
-			end)
-		end
-		touched = touched + 1
 	end
 
 	return touched
 end
 
+----------------------------------------------------------------------
+-- hooks por personaje
+----------------------------------------------------------------------
+function Hitbox:unwatch(char)
+	local set = self.conns[char]
+	if not set then
+		return
+	end
+	for i = 1, #set do
+		pcall(function()
+			set[i]:Disconnect()
+		end)
+	end
+	self.conns[char] = nil
+	self.watched[char] = nil
+end
+
+function Hitbox:watch(char)
+	if self.watched[char] then
+		return
+	end
+	self.watched[char] = true
+
+	local set = {}
+	self.conns[char] = set
+
+	local hum = PlayersLib.humanoid(char)
+	if hum then
+		set[#set + 1] = hum.Died:Connect(function()
+			-- muerto: el cuerpo vuelve a su tamaño y se suelta el personaje
+			for part in pairs(self.live) do
+				if part:IsDescendantOf(char) then
+					self:restorePart(part)
+				end
+			end
+			self:invalidate()
+		end)
+	end
+
+	set[#set + 1] = char.ChildAdded:Connect(function(child)
+		if child:IsA("BasePart") then
+			-- parte nueva (accesorio, ragdoll, lo que sea): entra al próximo pase
+			self:invalidate()
+		end
+	end)
+
+	set[#set + 1] = char.AncestryChanged:Connect(function()
+		if not char:IsDescendantOf(workspace) then
+			for part in pairs(self.live) do
+				if part:IsDescendantOf(char) then
+					self:restorePart(part)
+				end
+			end
+			self:unwatch(char)
+		end
+	end)
+end
+
+----------------------------------------------------------------------
+-- pase
+----------------------------------------------------------------------
 function Hitbox:step()
-	local s = self.state
+	local cfg = self:settings()
 
-	if not s.hitEnabled then
-		if next(self.originals) ~= nil then
-			self:restore()
+	if not cfg.enabled then
+		if next(self.live) ~= nil then
+			self:restoreAll()
 		end
-		return
+		if next(self.conns) ~= nil then
+			for char in pairs(self.conns) do
+				self:unwatch(char)
+			end
+		end
+		return 0
 	end
 
-	local now = os.clock()
-	if now < self.nextPass then
-		return
-	end
-	self.nextPass = now + self.interval
+	local total = 0
 
-	-- suelta referencias de partes de personajes que ya murieron o se
-	-- respawnearon; sin esto el mapa de originals crece toda la partida
-	for part in pairs(self.originals) do
-		if part.Parent == nil then
-			self.originals[part] = nil
-		end
-	end
-
-	local scale = math.max(s.hitScale or 1, 1)
-	local rootOnly = s.hitRootOnly
-	local budget = self.maxPlayers
-	local count = 0
-
-	for _, plr in ipairs(PlayersLib.all()) do
-		if count >= budget then
-			break
-		end
-		if plr ~= PlayersLib.me then
-			local char = plr.Character
-			local hum = PlayersLib.humanoid(char)
-			if char and hum and hum.Health > 0 then
-				self:applyTo(char, scale, rootOnly)
-				count = count + 1
+	if self.dirty then
+		self.dirty = false
+		-- limpiar refs de partes que ya no existen
+		for part in pairs(self.bases) do
+			if part.Parent == nil then
+				self.bases[part] = nil
+				self.live[part] = nil
 			end
 		end
 	end
+
+	local print = self:fingerprint(cfg)
+	if self.lastPrint ~= nil and self.lastPrint ~= print then
+		-- cambio de config: las partes viejas vuelven a su tamaño y la base
+		-- se vuelve a capturar limpia
+		for part in pairs(self.live) do
+			self:restorePart(part)
+		end
+		table.clear(self.live)
+	end
+	self.lastPrint = print
+
+	for _, plr in ipairs(PlayersLib.all()) do
+		if plr ~= PlayersLib.me then
+			local char = plr.Character
+			local hum = PlayersLib.humanoid(char)
+
+			if char and hum and hum.Health > 0 then
+				self:watch(char)
+				total = total + self:applyTo(char, cfg)
+			elseif char and self.watched[char] then
+				self:unwatch(char)
+			end
+		end
+	end
+
+	return total
 end
 
 function Hitbox:destroy()
-	self:restore()
+	for char in pairs(self.conns) do
+		self:unwatch(char)
+	end
+	self:restoreAll()
 end
 
 return Hitbox
@@ -1278,6 +1364,193 @@ return Radar
 
 end
 
+__modules["modules/hitdebug"] = function()
+--[[
+	Astral :: modules/hitdebug
+
+	cajas de alambre sobre cada parte que el hitbox tocó. sirve para ver de un
+	golpe si el expansor está haciendo algo: si la caja no aparece, no hay
+	partes infladas, y el problema es el juego (hit detection en servidor) o el
+	personaje, no el script.
+
+	toma las partes directo de Hitbox.live, así no duplica el barrido.
+]]
+
+local Hitbox = __require("modules/hitbox")
+local Mathx = __require("shared/mathx")
+
+local HitDebug = {}
+HitDebug.__index = HitDebug
+
+local COLOR = Color3.fromRGB(120, 220, 255)
+-- techo de cajas: 20 partes x 15 jugadores son 300 frames, y eso se siente
+local MAX_BOXES = 64
+
+function HitDebug.new(renderer, state, hitbox)
+	local self = setmetatable({}, HitDebug)
+	self.r = renderer
+	self.state = state
+	self.hitbox = hitbox
+	self.pool = setmetatable({}, { __mode = "k" }) -- part -> object
+	return self
+end
+
+-- tamaño de pantalla de una parte: se proyectan las 8 esquinas de su caja
+-- orientada y se saca el hull, igual que el ESP con el modelo entero
+local function partBox(cam, part)
+	local ok, cf, size = pcall(function()
+		return part.CFrame, part.Size
+	end)
+	if not ok or not cf then
+		return nil
+	end
+
+	-- un cubo inflado puede tener esquinas detrás de la cámara: el hull ya
+	-- descarta las que no proyectan
+	return Mathx.projectBox(cam, cf, size)
+end
+
+function HitDebug:step(cam)
+	local r = self.r
+	local want = self.state.hitEnabled and self.state.hitVisual
+
+	if not want then
+		if self.shown then
+			for _, o in pairs(self.pool) do
+				r.hide(o)
+			end
+			self.shown = false
+		end
+		return
+	end
+
+	self.shown = true
+	local vp = cam.ViewportSize
+	local boxes = 0
+
+	for part in pairs(self.hitbox.live) do
+		local o = self.pool[part]
+
+		if not part.Parent then
+			if o then
+				r.destroy(o)
+				self.pool[part] = nil
+			end
+			continue
+		end
+
+		local minX, minY, maxX, maxY = partBox(cam, part)
+
+		if not minX or maxX < 0 or maxY < 0 or minX > vp.X or minY > vp.Y then
+			if o then
+				r.hide(o)
+			end
+			continue
+		end
+
+		if not o then
+			if boxes >= MAX_BOXES then
+				continue
+			end
+			o = r.newRect()
+			self.pool[part] = o
+		end
+		boxes = boxes + 1
+
+		r.rect(o, minX, minY, maxX - minX, maxY - minY, COLOR, false, 1, 0, true)
+	end
+
+	-- partes que salieron del set (restore, muerte, cambio de modo) dejan su
+	-- objeto vivo: se apaga lo que no se tocó este frame
+	for part, o in pairs(self.pool) do
+		if not self.hitbox.live[part] then
+			r.hide(o)
+		end
+	end
+end
+
+function HitDebug:destroy()
+	for part, o in pairs(self.pool) do
+		self.r.destroy(o)
+		self.pool[part] = nil
+	end
+end
+
+return HitDebug
+
+end
+
+__modules["modules/diag"] = function()
+--[[
+	Astral :: modules/diag
+
+	un renglón en la pestaña Misc que dice qué está pasando de verdad:
+	renderer, jugadores vistos, cajas dibujadas, partes infladas.
+
+	existe porque "no hace nada" no dice si el script murió, si el juego no
+	expone personajes o si el hitbox no tiene a quién agrandar. con esto se
+	ve en un segundo.
+]]
+
+local PlayersLib = __require("shared/players")
+
+local Diag = {}
+Diag.__index = Diag
+
+local INTERVAL = 1
+
+function Diag.new(renderer, state, counts)
+	local self = setmetatable({}, Diag)
+	self.state = state
+	self.counts = counts -- { esp = fn() -> n, hit = fn() -> n }
+	self.next = 0
+	self.line = nil
+	self.renderer = renderer
+	return self
+end
+
+function Diag:attach(textHandle)
+	self.line = textHandle
+end
+
+function Diag:step()
+	local now = os.clock()
+	if now < self.next then
+		return
+	end
+	self.next = now + INTERVAL
+	if not self.line then
+		return
+	end
+
+	local players = #PlayersLib.all()
+	local esp = self.counts.esp and self.counts.esp() or 0
+	local hit = self.counts.hit and self.counts.hit() or 0
+	local cam = workspace.CurrentCamera
+
+	local parts = {}
+	parts[#parts + 1] = string.format("renderer %s", self.renderer.name)
+	parts[#parts + 1] = string.format("players %d", players)
+	parts[#parts + 1] = string.format("esp %d", esp)
+	parts[#parts + 1] = string.format("hit parts %d", hit)
+	parts[#parts + 1] = cam and "cam ok" or "cam nil"
+
+	local ok = pcall(function()
+		self.line:Set(table.concat(parts, "  ·  "))
+	end)
+	if not ok then
+		self.line = nil
+	end
+end
+
+function Diag:destroy()
+	self.line = nil
+end
+
+return Diag
+
+end
+
 __modules["ui/window"] = function()
 --[[
 	Astral :: ui/window
@@ -1291,6 +1564,7 @@ __modules["ui/window"] = function()
 ]]
 
 local Config = __require("shared/config")
+local Hitbox = __require("modules/hitbox") -- MODES
 local PlayersLib = __require("shared/players")
 
 local Window = {}
@@ -1384,23 +1658,56 @@ function Window.build(Rayfield, state, api)
 	local hit = tabs.hit
 	hit:CreateSection({ name = "Expander" })
 	b(hit:CreateToggle({ name = "Enabled", flag = "hitEnabled", value = state.hitEnabled }), "hitEnabled")
-	b(hit:CreateToggle({ name = "Root part only", flag = "hitRootOnly", value = state.hitRootOnly }), "hitRootOnly")
 
-	local hRange, hInc = Config.slider("hitScale")
-	b(hit:CreateSlider({
-		name = "Scale",
-		flag = "hitScale",
-		range = hRange,
-		increment = hInc,
-		value = state.hitScale,
-		suffix = "x",
-	}), "hitScale")
+	b(hit:CreateDropdown({
+		name = "Target",
+		flag = "hitMode",
+		options = Hitbox.MODES,
+		value = state.hitMode,
+	}), "hitMode")
+
+	hit:CreateSection({ name = "Per axis" })
+	local axes = { "X", "Y", "Z" }
+	for _, axis in ipairs(axes) do
+		local key = "hitScale" .. axis
+		local range, inc = Config.slider(key)
+		b(hit:CreateSlider({
+			name = "Scale " .. axis,
+			flag = key,
+			range = range,
+			increment = inc,
+			value = state[key],
+			suffix = "x",
+		}), key)
+	end
+
+	hit:CreateButton({
+		name = "Uniformes",
+		callback = function()
+			-- copia X a Y y Z, y mueve la UI sin volver a disparar callbacks
+			local x = state.hitScaleX
+			state.hitScaleY = x
+			state.hitScaleZ = x
+			if flags.hitScaleY then
+				flags.hitScaleY:Set(x, true)
+			end
+			if flags.hitScaleZ then
+				flags.hitScaleZ:Set(x, true)
+			end
+		end,
+	})
+
+	b(hit:CreateToggle({
+		name = "Debug boxes",
+		flag = "hitVisual",
+		value = state.hitVisual,
+	}), "hitVisual")
 
 	hit:CreateText({
 		name = "Scope",
-		text = "El Size se cambia solo en tu cliente: las partes son del otro jugador. "
-			.. "Funciona donde el hit detection corre del lado del cliente; en shooters "
-			.. "validados por servidor no hace nada. Se restaura al apagar y en unload.",
+		text = "El Size base se guarda una vez por parte y se restaura al apagar, "
+			.. "al morir el objetivo y al salir del workspace. Las partes nuevas las "
+			.. "captura ChildAdded, no un barrido por timer.",
 	})
 
 	------------------------------------------------------------------
@@ -1468,6 +1775,11 @@ function Window.build(Rayfield, state, api)
 		text = "Esquina superior derecha, 250 studs de radio, gira con la vista.",
 	})
 
+	local status = misc:CreateText({
+		name = "Status",
+		text = "midiendo...",
+	})
+
 	------------------------------------------------------------------
 	local cfg = tabs.cfg
 	cfg:CreateSection({ name = "Configuration" })
@@ -1505,7 +1817,7 @@ function Window.build(Rayfield, state, api)
 
 	cfg:CreateText({ name = "Info", text = api.infoText or "" })
 
-	return { window = window, flags = flags, tabs = tabs }
+	return { window = window, flags = flags, tabs = tabs, status = status }
 end
 
 -- Rayfield puede aplicar el archivo guardado después de crear los elementos
@@ -1544,6 +1856,8 @@ local Esp = __require("modules/esp")
 local Hitbox = __require("modules/hitbox")
 local Aim = __require("modules/aim")
 local Radar = __require("modules/radar")
+local HitDebug = __require("modules/hitdebug")
+local Diag = __require("modules/diag")
 local Window = __require("ui/window")
 
 local RunService = game:GetService("RunService")
@@ -1567,7 +1881,7 @@ end
 ----------------------------------------------------------------------
 -- renderer
 ----------------------------------------------------------------------
-local renderer = Renderer.pick()
+local renderer = Renderer.build()
 if not renderer then
 	return warn("[Astral] sin renderer: no hay Drawing y no se pudo abrir un ScreenGui")
 end
@@ -1576,14 +1890,25 @@ end
 -- módulos
 ----------------------------------------------------------------------
 local esp = Esp.new(renderer, state)
-local hitbox = Hitbox.new(state, {
-	interval = Config.hitboxInterval,
-	maxPlayers = Config.hitboxMaxPlayers,
-})
+local hitbox = Hitbox.new()
+hitbox.state = state
 local radar = Radar.new(renderer, state)
 local aim = Aim.new(state, renderer)
+local hitDebug = HitDebug.new(renderer, state, hitbox)
+local diag = Diag.new(renderer, state, {
+	esp = function()
+		return esp.drawn or 0
+	end,
+	hit = function()
+		local n = 0
+		for _ in pairs(hitbox.live) do
+			n = n + 1
+		end
+		return n
+	end,
+})
 
-local modules = { esp = esp, hitbox = hitbox, radar = radar, aim = aim }
+local modules = { esp = esp, hitbox = hitbox, radar = radar, aim = aim, hitDebug = hitDebug, diag = diag }
 local conns = {}
 local unloaded = false
 
@@ -1686,6 +2011,9 @@ if not okUI or type(built) ~= "table" then
 end
 
 ui = built
+if ui.status then
+	diag:attach(ui.status)
+end
 
 api = {
 	state = state,
@@ -1701,7 +2029,7 @@ end
 ----------------------------------------------------------------------
 -- loop
 ----------------------------------------------------------------------
-local function frame(dt)
+local function frame(dt, elapsed)
 	if unloaded then
 		return
 	end
@@ -1713,6 +2041,8 @@ local function frame(dt)
 
 	esp:step(cam)
 	hitbox:step()
+	hitDebug:step(cam)
+	diag:step()
 	radar:step(cam)
 	aim:step(dt)
 end

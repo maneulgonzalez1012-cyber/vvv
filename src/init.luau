@@ -15,6 +15,8 @@ local Esp = require(script.modules.esp)
 local Hitbox = require(script.modules.hitbox)
 local Aim = require(script.modules.aim)
 local Radar = require(script.modules.radar)
+local HitDebug = require(script.modules.hitdebug)
+local Diag = require(script.modules.diag)
 local Window = require(script.ui.window)
 
 local RunService = game:GetService("RunService")
@@ -38,7 +40,7 @@ end
 ----------------------------------------------------------------------
 -- renderer
 ----------------------------------------------------------------------
-local renderer = Renderer.pick()
+local renderer = Renderer.build()
 if not renderer then
 	return warn("[Astral] sin renderer: no hay Drawing y no se pudo abrir un ScreenGui")
 end
@@ -47,14 +49,25 @@ end
 -- módulos
 ----------------------------------------------------------------------
 local esp = Esp.new(renderer, state)
-local hitbox = Hitbox.new(state, {
-	interval = Config.hitboxInterval,
-	maxPlayers = Config.hitboxMaxPlayers,
-})
+local hitbox = Hitbox.new()
+hitbox.state = state
 local radar = Radar.new(renderer, state)
 local aim = Aim.new(state, renderer)
+local hitDebug = HitDebug.new(renderer, state, hitbox)
+local diag = Diag.new(renderer, state, {
+	esp = function()
+		return esp.drawn or 0
+	end,
+	hit = function()
+		local n = 0
+		for _ in pairs(hitbox.live) do
+			n = n + 1
+		end
+		return n
+	end,
+})
 
-local modules = { esp = esp, hitbox = hitbox, radar = radar, aim = aim }
+local modules = { esp = esp, hitbox = hitbox, radar = radar, aim = aim, hitDebug = hitDebug, diag = diag }
 local conns = {}
 local unloaded = false
 
@@ -157,6 +170,9 @@ if not okUI or type(built) ~= "table" then
 end
 
 ui = built
+if ui.status then
+	diag:attach(ui.status)
+end
 
 api = {
 	state = state,
@@ -172,7 +188,7 @@ end
 ----------------------------------------------------------------------
 -- loop
 ----------------------------------------------------------------------
-local function frame(dt)
+local function frame(dt, elapsed)
 	if unloaded then
 		return
 	end
@@ -184,6 +200,8 @@ local function frame(dt)
 
 	esp:step(cam)
 	hitbox:step()
+	hitDebug:step(cam)
+	diag:step()
 	radar:step(cam)
 	aim:step(dt)
 end

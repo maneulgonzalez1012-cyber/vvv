@@ -28,6 +28,7 @@ function Esp.new(renderer, state)
 	self.state = state
 	self.pool = {}
 	self.anyVisible = false
+	self.drawn = 0
 	self.conn = PlayersLib.service.PlayerRemoving:Connect(function(plr)
 		self:forget(plr)
 	end)
@@ -104,6 +105,7 @@ function Esp:step(cam)
 		if self.anyVisible then
 			self:hideAll()
 		end
+		self.drawn = 0
 		return 0
 	end
 
@@ -183,6 +185,7 @@ function Esp:step(cam)
 	end
 
 	self.anyVisible = drawn > 0
+	self.drawn = drawn
 	return drawn
 end
 
