@@ -1,51 +1,47 @@
 --[[
 	vvv · loader
-	Único punto de entrada. Ejecuta el script real desde el repo y lo mantiene
-	al día: si kindmops cambia el archivo, esto carga la versión nueva sin
-	tocar el executor.
+	Pega este bloque entero en el executor. Carga vanta_shooter.lua desde el repo.
 
-	Uso: pega este bloque entero en el executor. Nada más.
+	Orden de resolución:
+	  1. main            -> versión estable (después del merge)
+	  2. <sha>           -> commit exacto donde vive el script hoy
+
+	Sin refs con slash: raw.githubusercontent resuelve ambiguo con
+	nombres tipo arena/xxxx, así que el fallback va por SHA de 40 chars.
 ]]
 
-local RAW = "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv"
-local REFS = {
-	"arena/04e548ad-vvv",   -- rama de trabajo
-	"main",                 -- después del merge
+local RAW    = "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/vvv"
+local FILE   = "roblox/vanta_shooter.lua"
+local REFS   = {
+	"main",
+	"5a97fd327e38abdfb0164011b34fad6c1dacf96f",   -- vanta_shooter.lua
 }
-local FILE = "roblox/vanta_shooter.lua"
 
--- cache buster: algunos executors cachean HttpGet por URL
-local bust = "?t=" .. tostring(os.time()) .. "&r=" .. tostring(math.random(1e6))
+local bust = "?t=" .. tostring(os.time()) .. tostring(math.random(100000, 999999))
 
 local function fetch(url)
 	local ok, body = pcall(game.HttpGet, game, url)
-	if ok and type(body) == "string" and #body > 64 then
-		-- una página 404 de GitHub es HTML, no Lua
-		if body:sub(1, 1) ~= "<" and body:find("local ", 1, true) then
-			return body
-		end
-	end
-	return nil
+	if not ok or type(body) ~= "string" or #body < 64 then return nil end
+	-- un 404 de GitHub vuelve como HTML; el script empieza con "--"
+	if body:sub(1, 1) == "<" then return nil end
+	if not body:find("local ", 1, true) then return nil end
+	return body
 end
 
-local source, err
+local source
 for _, ref in ipairs(REFS) do
 	source = fetch(RAW .. "/" .. ref .. "/" .. FILE .. bust)
-	if source then
-		err = nil
-		break
-	end
-	err = "no disponible en '" .. ref .. "'"
+	if source then break end
 end
 
 if not source then
-	warn("[vvv] loader: " .. tostring(err))
+	warn("[vvv] loader: no pude bajar " .. FILE .. " (main ni SHA)")
 	return
 end
 
 local chunk, compileErr = loadstring(source)
 if not chunk then
-	warn("[vvv] loader: el script no compila — " .. tostring(compileErr))
+	warn("[vvv] loader: no compila — " .. tostring(compileErr))
 	return
 end
 
