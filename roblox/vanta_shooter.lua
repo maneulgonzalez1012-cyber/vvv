@@ -5,9 +5,10 @@
 	Render: caja, nombre, distancia y barra de vida son Frames/TextLabels
 	dentro de un ScreenGui. Cero Drawing API en este archivo.
 
-	Hitbox: agranda los limb parts de otros jugadores del lado del cliente.
-	Rinde donde el hitreg pasa por el cliente (raycast local + RemoteEvent).
-	Si el juego valida el daño en el servidor contra sus hitboxes, no hace nada.
+	Hitbox: agranda parts de otros jugadores del lado del cliente, por frame,
+	re-aplicando cuando el servidor revierte la escritura. Modos: Auto, Head,
+	HumanoidRootPart, Torso, Limbs, Todo. El botón de diagnóstico dice si el
+	juego revierte el Size o si el hitreg corre en el servidor.
 ]]
 
 if not game:IsLoaded() then
@@ -49,6 +50,8 @@ local cfg = {
 	},
 	hitbox = {
 		enabled    = false,
+		mode       = "Auto",
+		noCollide  = true,
 		multiplier = 1.6,
 		teammates  = false,
 	},
@@ -318,123 +321,288 @@ end
 -- =====================================================================
 
 local Hitbox = {
-	originals = {},   -- [BasePart] = Vector3 original
-	applied   = {},   -- [Model] = multiplicador aplicado
-	walkedAt  = {},   -- [Model] = os.clock del último pase
+	state   = {},    -- [Model] = { mult, mode, builtAt, n, entries = { {p, base, want, cc} } }
+	-- tamaño/collision originales por part, sobreviven a rebuilds: si no,
+	-- cambiar el multiplicador tomaría el tamaño ya agrandado como base
+	originals = {},  -- [BasePart] = Vector3
+	origCc    = {},  -- [BasePart] = boolean
 	running   = false,
 }
 
-local LIMBS = {
-	-- HRP fuera: casi ningún juego lo usa como hitbox y agrandarlo ensucia el ESP
-	Head = true, Torso = true, UpperTorso = true, LowerTorso = true,
-	["Left Arm"] = true, ["Right Arm"] = true, ["Left Leg"] = true, ["Right Leg"] = true,
+-- nombres estándar R6/R15 + variantes sin espacio que usan algunos rigs
+local LIMB_NAMES = {
+	Head = true,
+	Torso = true, UpperTorso = true, LowerTorso = true,
+	HumanoidRootPart = true,
+	["Left Arm"] = true, ["Right Arm"] = true,
+	["Left Leg"] = true, ["Right Leg"] = true,
+	LeftArm = true, RightArm = true, LeftLeg = true, RightLeg = true,
 	LeftUpperArm = true, LeftLowerArm = true, LeftHand = true,
 	RightUpperArm = true, RightLowerArm = true, RightHand = true,
 	LeftUpperLeg = true, LeftLowerLeg = true, LeftFoot = true,
 	RightUpperLeg = true, RightLowerLeg = true, RightFoot = true,
 }
 
+local MODES = { "Auto", "Head", "HumanoidRootPart", "Torso", "Limbs", "Todo" }
+
+local function isGear(part)
+	return part:FindFirstAncestorOfClass("Accessory") ~= nil
+		or part:FindFirstAncestorWhichIsA("Tool") ~= nil
+end
+
+local function collect(char, mode)
+	local out, seen = {}, {}
+
+	local function add(p)
+		if p and p:IsA("BasePart") and not seen[p] and not isGear(p) then
+			seen[p] = true
+			out[#out + 1] = p
+		end
+	end
+
+	if mode == "Head" then
+		add(char:FindFirstChild("Head"))
+	elseif mode == "HumanoidRootPart" then
+		add(char:FindFirstChild("HumanoidRootPart"))
+	elseif mode == "Torso" then
+		add(char:FindFirstChild("UpperTorso"))
+		add(char:FindFirstChild("Torso"))
+		add(char:FindFirstChild("LowerTorso"))
+	elseif mode == "Limbs" then
+		for _, d in ipairs(char:GetDescendants()) do
+			if LIMB_NAMES[d.Name] then add(d) end
+		end
+	elseif mode == "Todo" then
+		for _, d in ipairs(char:GetDescendants()) do add(d) end
+	else
+		-- Auto: limbs + HRP. Si el rig no usa nombres estándar, cualquier
+		-- BasePart directa del modelo (rigs custom, skinned).
+		for _, d in ipairs(char:GetDescendants()) do
+			if LIMB_NAMES[d.Name] then add(d) end
+		end
+		if #out == 0 then
+			for _, d in ipairs(char:GetChildren()) do add(d) end
+		end
+	end
+
+	return out
+end
+
 function Hitbox:isEnemy(plr)
 	if cfg.hitbox.teammates then return true end
 	return not (LP.Team ~= nil and plr.Team == LP.Team)
 end
 
-function Hitbox:expand(char, mult)
-	local hum = char:FindFirstChildOfClass("Humanoid")
-	if not hum or hum.Health <= 0 then return end
+function Hitbox:build(char, mult)
+	local parts = collect(char, cfg.hitbox.mode)
+	local entries = table.create(#parts)
 
-	local targets = {}
-	for _, d in ipairs(char:GetDescendants()) do
-		if d:IsA("BasePart") and LIMBS[d.Name] then
-			targets[#targets + 1] = d
+	for i = 1, #parts do
+		local p = parts[i]
+		local base = self.originals[p]
+		if not base then
+			base = p.Size
+			self.originals[p] = base
 		end
+		local cc = self.origCc[p]
+		if cc == nil then
+			cc = p.CanCollide
+			self.origCc[p] = cc
+		end
+		entries[i] = {
+			p = p,
+			base = base,
+			want = base * mult,
+			cc = cc,
+		}
 	end
-	if #targets == 0 then
-		-- rig custom sin nombres estándar
-		for _, d in ipairs(char:GetChildren()) do
-			if d:IsA("BasePart") then
-				targets[#targets + 1] = d
+
+	local st = {
+		mult = mult,
+		mode = cfg.hitbox.mode,
+		builtAt = os.clock(),
+		n = #entries,
+		entries = entries,
+	}
+	self.state[char] = st
+	return st
+end
+
+-- hot path: sólo escribe cuando difiere. Comparar tres floats es el costo.
+local function applyState(st, noCollide)
+	local entries, n = st.entries, st.n
+	for i = 1, n do
+		local e = entries[i]
+		local p = e.p
+		if p.Parent then
+			if p.Size ~= e.want then
+				p.Size = e.want
+			end
+			if noCollide and p.CanCollide then
+				p.CanCollide = false
 			end
 		end
 	end
-
-	for _, part in ipairs(targets) do
-		local original = self.originals[part]
-		if not original then
-			original = part.Size
-			self.originals[part] = original
-		end
-		local want = original * mult
-		if (part.Size - want).Magnitude > 0.01 then
-			pcall(function() part.Size = want end)
-		end
-	end
-
-	self.applied[char] = mult
-	self.walkedAt[char] = os.clock()
 end
 
 function Hitbox:restore(char)
-	for _, d in ipairs(char:GetDescendants()) do
-		local original = self.originals[d]
-		if original then
-			pcall(function() d.Size = original end)
-			self.originals[d] = nil
-		end
-	end
-	self.applied[char] = nil
-	self.walkedAt[char] = nil
-end
+	local st = self.state[char]
+	if not st then return end
 
-function Hitbox:prune()
-	for part in pairs(self.originals) do
-		if not part.Parent then
-			self.originals[part] = nil
+	for i = 1, st.n do
+		local e = st.entries[i]
+		local p = e.p
+		if p.Parent then
+			pcall(function()
+				p.Size = e.base
+				p.CanCollide = e.cc
+			end)
 		end
+		self.originals[p] = nil
+		self.origCc[p] = nil
 	end
-	for char in pairs(self.applied) do
-		if not char.Parent then
-			self.applied[char] = nil
-			self.walkedAt[char] = nil
-		end
-	end
+
+	self.state[char] = nil
 end
 
 function Hitbox:reset()
-	for char in pairs(self.applied) do
+	local chars = {}
+	for char in pairs(self.state) do
+		chars[#chars + 1] = char
+	end
+	for i = 1, #chars do
+		local char = chars[i]
 		if char.Parent then
-			self:restore(char)
+			pcall(self.restore, self, char)
+		else
+			self.state[char] = nil
 		end
 	end
-	self.applied = {}
-	self.walkedAt = {}
-	self:prune()
 end
 
-function Hitbox:step()
+function Hitbox:prune()
+	for char in pairs(self.state) do
+		if not char.Parent then
+			self.state[char] = nil
+		end
+	end
+	-- parts de personajes que ya no existen: fuera del mapa original
+	for part in pairs(self.originals) do
+		if not part.Parent then
+			self.originals[part] = nil
+			self.origCc[part] = nil
+		end
+	end
+end
+
+-- Se llama cada frame: el servidor reescribe Size del personaje de otro
+-- jugador cuando su dueño replica, así que una pasada cada 0.25s no alcanza.
+function Hitbox:tick()
 	if not cfg.hitbox.enabled then return end
+
 	local mult = cfg.hitbox.multiplier
+	local mode = cfg.hitbox.mode
+	local noCollide = cfg.hitbox.noCollide
+	local now = os.clock()
+
+	if now - (self.prunedAt or 0) > 2 then
+		self.prunedAt = now
+		self:prune()
+	end
 
 	for _, plr in ipairs(Players:GetPlayers()) do
 		if plr ~= LP then
 			local char = plr.Character
-			if char and char.Parent then
-				if self:isEnemy(plr) then
-					local applied = self.applied[char]
-					local stale = applied == nil
-						or math.abs(applied - mult) > 0.001
-						or (self.walkedAt[char] or 0) + 2 < os.clock()
-					if stale then
-						self:expand(char, mult)
+			if char and char.Parent and self:isEnemy(plr) then
+				local hum = char:FindFirstChildOfClass("Humanoid")
+				if hum and hum.Health > 0 then
+					local st = self.state[char]
+					if not st or st.mult ~= mult or st.mode ~= mode or st.builtAt + 2 < now then
+						st = self:build(char, mult)
 					end
-				elseif self.applied[char] then
-					self:restore(char)
+					if st.n > 0 then
+						-- un pcall por personaje, no por part
+						if not pcall(applyState, st, noCollide) then
+							self.state[char] = nil
+						end
+					end
 				end
+			elseif self.state[char] then
+				pcall(self.restore, self, char)
 			end
 		end
 	end
+end
 
-	self:prune()
+-- Escribe, espera y lee de vuelta: dice si el juego revierte las escrituras
+-- o si aguantan. Sin esto se adivina.
+function Hitbox:diagnose()
+	local target, char
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LP and self:isEnemy(plr) then
+			local c = plr.Character
+			if c and c.Parent and c:FindFirstChildOfClass("Humanoid") then
+				target, char = plr, c
+				break
+			end
+		end
+	end
+	if not char then
+		return false, "no hay otro jugador con personaje"
+	end
+
+	local parts = collect(char, cfg.hitbox.mode)
+	if #parts == 0 then
+		return false, string.format("0 parts en modo '%s' para %s", cfg.hitbox.mode, target.Name)
+	end
+
+	local probe = table.create(#parts)
+	for i = 1, #parts do
+		probe[i] = { p = parts[i], size = parts[i].Size }
+	end
+
+	local blocked = 0
+	for i = 1, #probe do
+		local s = probe[i]
+		local ok = pcall(function()
+			s.p.Size = s.size * 1.5
+		end)
+		if not ok then
+			blocked = blocked + 1
+		end
+	end
+
+	task.wait(0.15)
+
+	local stuck, reverted, gone = 0, 0, 0
+	for i = 1, #probe do
+		local s = probe[i]
+		if not s.p.Parent then
+			gone = gone + 1
+		else
+			local want = s.size * 1.5
+			if (s.p.Size - want).Magnitude < 0.05 then
+				stuck = stuck + 1
+			else
+				reverted = reverted + 1
+			end
+			pcall(function() s.p.Size = s.size end)
+		end
+	end
+
+	local verdict
+	if stuck == 0 then
+		verdict = "el cliente escribe Size y el juego lo revierte al frame siguiente"
+	elseif reverted > 0 then
+		verdict = "parte se queda, parte se revierte: el juego reescribe esos parts"
+	else
+		verdict = "Size se queda. Si igual no pega, el hitreg del juego corre en el servidor"
+	end
+
+	return true, string.format(
+		"%s · %d parts · %d quedan · %d revertidas · %d bloqueadas · %d desaparecidas. %s",
+		target.Name, #probe, stuck, reverted, blocked, gone, verdict
+	)
 end
 
 -- =====================================================================
@@ -529,24 +697,64 @@ espTab:CreateColorPicker({
 local hbTab = window:CreateTab({ name = "Hitbox" })
 hbTab:CreateSection({ name = "Expander" })
 
+local function restartHitbox()
+	Hitbox:reset()
+	if cfg.hitbox.enabled then
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= LP and Hitbox:isEnemy(plr) then
+				local c = plr.Character
+				if c and c.Parent and c:FindFirstChildOfClass("Humanoid") then
+					Hitbox:build(c, cfg.hitbox.multiplier)
+				end
+			end
+		end
+	end
+end
+
 local hbToggle = hbTab:CreateToggle({
 	name = "Hitbox expander",
 	flag = "hb_enabled",
 	value = false,
 	callback = function(v)
 		cfg.hitbox.enabled = v
-		if not v then Hitbox:reset() end
+		if v then
+			restartHitbox()
+		else
+			Hitbox:reset()
+		end
+	end,
+})
+
+hbTab:CreateDropdown({
+	name = "Qué agrandar",
+	flag = "hb_mode",
+	options = MODES,
+	value = "Auto",
+	callback = function(choice)
+		cfg.hitbox.mode = choice
+		restartHitbox()
 	end,
 })
 
 hbTab:CreateSlider({
 	name = "Multiplicador",
 	flag = "hb_mult",
-	range = { 1, 3 },
-	increment = 0.05,
+	range = { 1, 8 },
+	increment = 0.1,
 	value = 1.6,
 	suffix = "x",
-	callback = function(v) cfg.hitbox.multiplier = v end,
+	callback = function(v)
+		cfg.hitbox.multiplier = v
+		if cfg.hitbox.enabled then restartHitbox() end
+	end,
+})
+
+hbTab:CreateToggle({
+	name = "Quitar colisión al hitbox",
+	description = "Evita que el cuerpo agrandado empuje o trabe",
+	flag = "hb_nocc",
+	value = true,
+	callback = function(v) cfg.hitbox.noCollide = v end,
 })
 
 hbTab:CreateToggle({
@@ -558,12 +766,27 @@ hbTab:CreateToggle({
 
 hbTab:CreateButton({
 	name = "Restaurar hitboxes ahora",
-	callback = function() Hitbox:reset() end,
+	callback = function()
+		Hitbox:reset()
+		if cfg.hitbox.enabled then restartHitbox() end
+	end,
+})
+
+hbTab:CreateButton({
+	name = "Probar si el juego revierte el Size",
+	callback = function()
+		local ok, msg = Hitbox:diagnose()
+		window:Notify({
+			title = ok and "Diagnóstico de hitbox" or "Diagnóstico falló",
+			content = msg,
+			duration = 10,
+		})
+	end,
 })
 
 hbTab:CreateText({
-	name = "Alcance",
-	text = "Head, torso, brazos y piernas, del lado del cliente. Funciona con hitreg local; si el servidor valida contra sus propias hitboxes, no cambia nada. Al apagar restaura el tamaño original.",
+	name = "Si el Size se queda pero no pega",
+	text = "El hitreg corre en el servidor y valida contra sus propias hitboxes: no hay nada que el cliente pueda agrandar. Prueba 'Todo' o 'HumanoidRootPart' antes de descartarlo. El diagnóstico dice si las escrituras aguantan.",
 })
 
 -- ---------------------------- Config ----------------------------
@@ -652,20 +875,33 @@ local removingConn = Players.PlayerRemoving:Connect(function(plr)
 	if plr.Character then Hitbox:restore(plr.Character) end
 end)
 
+-- el servidor reescribe Size cuando el dueño replica: corre por frame.
+-- build sólo cuando cambia el multiplicador/modo; escribir, sólo si difiere.
 Hitbox.running = true
-task.spawn(function()
-	while Hitbox.running do
-		local ok, err = pcall(function() Hitbox:step() end)
-		if not ok then warn("vanta hitbox: " .. tostring(err)) end
-		task.wait(0.25)
+local hbConn
+do
+	local ok = pcall(function()
+		hbConn = RunService.RenderStepped:Connect(function()
+			if Hitbox.running then
+				Hitbox:tick()
+			end
+		end)
+	end)
+	if not ok then
+		hbConn = RunService.Heartbeat:Connect(function()
+			if Hitbox.running then
+				Hitbox:tick()
+			end
+		end)
 	end
-end)
+end
 
 genv.VANTA = {
 	destroy = function()
 		ESP.running = false
 		Hitbox.running = false
 		if renderConn then pcall(function() renderConn:Disconnect() end) end
+		if hbConn then pcall(function() hbConn:Disconnect() end) end
 		if removingConn then pcall(function() removingConn:Disconnect() end) end
 		Hitbox:reset()
 		ESP:destroy()
