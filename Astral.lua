@@ -1862,11 +1862,14 @@ local Window = __require("ui/window")
 
 local RunService = game:GetService("RunService")
 
--- una instancia anterior no puede seguir viva: dos loops y dos ventanas
+-- la instancia anterior se apaga al final, cuando esta ya está armada: si el
+-- arranque falla (sin renderer, sin Rayfield, UI rota) la vieja sigue viva en
+-- vez de quedar el usuario sin nada
+local previous
 if getgenv then
 	local prev = getgenv().Astral
 	if type(prev) == "table" and type(prev.unload) == "function" then
-		pcall(prev.unload)
+		previous = prev
 	end
 end
 
@@ -2021,6 +2024,11 @@ api = {
 	renderer = renderer,
 	unload = unload,
 }
+
+if previous then
+	pcall(previous.unload)
+	previous = nil
+end
 
 if getgenv then
 	getgenv().Astral = api

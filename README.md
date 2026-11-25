@@ -10,6 +10,17 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cy
 Si algo no responde, la pestaña **Misc → Status** dice qué está viendo el script en ese
 segundo: renderer, jugadores, cajas de ESP, partes infladas y si hay cámara.
 
+## Loader
+
+`loader.lua` es una sola línea de uso, y si falla dice exactamente por qué:
+
+- timeout de 20 s sobre `HttpGet` (que en varios executors se cuelga sin devolver nunca)
+- distingue error de red, respuesta vacía, tabla en vez de texto, 404 en texto plano y
+  HTML de error — cada uno con su mensaje
+- si la fuente principal de raw.githubusercontent falla, prueba jsDelivr y luego `main`
+- apaga la instancia anterior **solo cuando la nueva ya arrancó**: si el fetch o el arranque
+  revientan, la que estaba corriendo sigue viva
+
 ## Render
 
 **ScreenGui, no Drawing.** `Drawing` no existe o no pinta nada en varios executors,
