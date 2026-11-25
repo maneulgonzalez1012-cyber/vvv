@@ -51,9 +51,12 @@ local cfg = {
 	hitbox = {
 		enabled    = false,
 		mode       = "Auto",
+		partName   = "",
 		noCollide  = true,
+		visual     = false,
 		multiplier = 1.6,
 		teammates  = false,
+		color      = Color3.fromRGB(255, 92, 92),
 	},
 }
 
@@ -69,15 +72,18 @@ local ESP = {
 	running = false,
 }
 
+local function getUIParent()
+	if type(gethui) == "function" then
+		local ok, res = pcall(gethui)
+		if ok and res then return res end
+	end
+	return LP:FindFirstChild("PlayerGui") or game:GetService("CoreGui")
+end
+
 function ESP:mount()
 	if self.gui then return end
 
-	local parent
-	if type(gethui) == "function" then
-		local ok, res = pcall(gethui)
-		if ok and res then parent = res end
-	end
-	parent = parent or LP:FindFirstChild("PlayerGui") or game:GetService("CoreGui")
+	local parent = getUIParent()
 
 	local gui = Instance.new("ScreenGui")
 	gui.Name = "vanta_esp"
@@ -321,11 +327,15 @@ end
 -- =====================================================================
 
 local Hitbox = {
-	state   = {},    -- [Model] = { mult, mode, builtAt, n, entries = { {p, base, want, cc} } }
-	-- tamaño/collision originales por part, sobreviven a rebuilds: si no,
-	-- cambiar el multiplicador tomaría el tamaño ya agrandado como base
-	originals = {},  -- [BasePart] = Vector3
-	origCc    = {},  -- [BasePart] = boolean
+	state     = {},   -- [Model] = { mult, mode, partName, builtAt, n, entries = { {p, base, want, cc} } }
+	-- originales por part, sobreviven a rebuilds: si no, cambiar el multiplicador
+	-- con la hitbox ya agrandada toma el tamaño agrandado como base
+	originals = {},   -- [BasePart] = Vector3
+	origCc    = {},   -- [BasePart] = boolean
+	adorn     = {},   -- [BasePart] = BoxHandleAdornment (prueba visual)
+	visualGui = nil,
+	writes    = 0,    -- escrituras aplicadas, se resetea cada segundo
+	builds    = 0,
 	running   = false,
 }
 
@@ -343,14 +353,14 @@ local LIMB_NAMES = {
 	RightUpperLeg = true, RightLowerLeg = true, RightFoot = true,
 }
 
-local MODES = { "Auto", "Head", "HumanoidRootPart", "Torso", "Limbs", "Todo" }
+local MODES = { "Auto", "Head", "HumanoidRootPart", "Torso", "Limbs", "Todo", "Nombre" }
 
 local function isGear(part)
 	return part:FindFirstAncestorOfClass("Accessory") ~= nil
 		or part:FindFirstAncestorWhichIsA("Tool") ~= nil
 end
 
-local function collect(char, mode)
+local function collect(char, mode, partName)
 	local out, seen = {}, {}
 
 	local function add(p)
@@ -360,10 +370,16 @@ local function collect(char, mode)
 		end
 	end
 
-	if mode == "Head" then
+	if mode == "Nombre" then
+		if not partName or partName == "" then return out end
+		for _, d in ipairs(char:GetDescendants()) do
+			if d:IsA("BasePart") and d.Name == partName then add(d) end
+		end
+	elseif mode == "Head" then
 		add(char:FindFirstChild("Head"))
 	elseif mode == "HumanoidRootPart" then
 		add(char:FindFirstChild("HumanoidRootPart"))
+		add(char:FindFirstChild("RootPart"))
 	elseif mode == "Torso" then
 		add(char:FindFirstChild("UpperTorso"))
 		add(char:FindFirstChild("Torso"))
@@ -393,8 +409,54 @@ function Hitbox:isEnemy(plr)
 	return not (LP.Team ~= nil and plr.Team == LP.Team)
 end
 
+-- ---------- prueba visual ----------
+
+-- los adornments renderizan bien colgados de la cámara; CoreGui/PlayerGui
+-- no siempre los dibuja en R6
+function Hitbox:visualGui_()
+	if self.visualGui and self.visualGui.Parent then return self.visualGui end
+	local parent = Workspace.CurrentCamera or getUIParent()
+	local folder = Instance.new("Folder")
+	folder.Name = "vanta_hitbox"
+	folder.Parent = parent
+	self.visualGui = folder
+	return folder
+end
+
+function Hitbox:adornFor(p, want)
+	local a = self.adorn[p]
+	if not a then
+		a = Instance.new("BoxHandleAdornment")
+		a.Name = "vanta_box"
+		a.Adornee = p
+		a.AlwaysOnTop = true
+		a.ZIndex = 2
+		a.Color3 = cfg.hitbox.color
+		a.Transparency = 0.6
+		a.Size = want + Vector3.new(0.05, 0.05, 0.05)
+		a.Parent = self:visualGui_()
+		self.adorn[p] = a
+	end
+	a.Size = want + Vector3.new(0.05, 0.05, 0.05)
+	a.Color3 = cfg.hitbox.color
+	return a
+end
+
+function Hitbox:clearVisual()
+	for p, a in pairs(self.adorn) do
+		pcall(function() a:Destroy() end)
+		self.adorn[p] = nil
+	end
+	if self.visualGui then
+		pcall(function() self.visualGui:Destroy() end)
+		self.visualGui = nil
+	end
+end
+
+-- ---------- build / apply / restore ----------
+
 function Hitbox:build(char, mult)
-	local parts = collect(char, cfg.hitbox.mode)
+	local parts = collect(char, cfg.hitbox.mode, cfg.hitbox.partName)
 	local entries = table.create(#parts)
 
 	for i = 1, #parts do
@@ -420,29 +482,37 @@ function Hitbox:build(char, mult)
 	local st = {
 		mult = mult,
 		mode = cfg.hitbox.mode,
+		partName = cfg.hitbox.partName,
 		builtAt = os.clock(),
 		n = #entries,
 		entries = entries,
 	}
 	self.state[char] = st
+	self.builds += 1
 	return st
 end
 
--- hot path: sólo escribe cuando difiere. Comparar tres floats es el costo.
-local function applyState(st, noCollide)
+-- devuelve cuántas escrituras hizo: si el juego revierte, esto sube cada frame
+local function applyState(st, noCollide, visual, self_)
 	local entries, n = st.entries, st.n
+	local writes = 0
 	for i = 1, n do
 		local e = entries[i]
 		local p = e.p
 		if p.Parent then
 			if p.Size ~= e.want then
 				p.Size = e.want
+				writes += 1
 			end
 			if noCollide and p.CanCollide then
 				p.CanCollide = false
 			end
+			if visual then
+				self_:adornFor(p, e.want)
+			end
 		end
 	end
+	return writes
 end
 
 function Hitbox:restore(char)
@@ -457,6 +527,11 @@ function Hitbox:restore(char)
 				p.Size = e.base
 				p.CanCollide = e.cc
 			end)
+		end
+		local a = self.adorn[p]
+		if a then
+			pcall(function() a:Destroy() end)
+			self.adorn[p] = nil
 		end
 		self.originals[p] = nil
 		self.origCc[p] = nil
@@ -478,6 +553,7 @@ function Hitbox:reset()
 			self.state[char] = nil
 		end
 	end
+	self:clearVisual()
 end
 
 function Hitbox:prune()
@@ -486,11 +562,15 @@ function Hitbox:prune()
 			self.state[char] = nil
 		end
 	end
-	-- parts de personajes que ya no existen: fuera del mapa original
 	for part in pairs(self.originals) do
 		if not part.Parent then
 			self.originals[part] = nil
 			self.origCc[part] = nil
+			local a = self.adorn[part]
+			if a then
+				pcall(function() a:Destroy() end)
+				self.adorn[part] = nil
+			end
 		end
 	end
 end
@@ -502,7 +582,9 @@ function Hitbox:tick()
 
 	local mult = cfg.hitbox.multiplier
 	local mode = cfg.hitbox.mode
+	local partName = cfg.hitbox.partName
 	local noCollide = cfg.hitbox.noCollide
+	local visual = cfg.hitbox.visual
 	local now = os.clock()
 
 	if now - (self.prunedAt or 0) > 2 then
@@ -517,14 +599,20 @@ function Hitbox:tick()
 				local hum = char:FindFirstChildOfClass("Humanoid")
 				if hum and hum.Health > 0 then
 					local st = self.state[char]
-					if not st or st.mult ~= mult or st.mode ~= mode or st.builtAt + 2 < now then
+					if not st
+						or st.mult ~= mult
+						or st.mode ~= mode
+						or st.partName ~= partName
+						or st.builtAt + 2 < now
+					then
 						st = self:build(char, mult)
-						if st.n > 0 then
-							pcall(applyState, st, noCollide)
-						end
-					elseif st.n > 0 then
+					end
+					if st.n > 0 then
 						-- un pcall por personaje, no por part
-						if not pcall(applyState, st, noCollide) then
+						local ok, wrote = pcall(applyState, st, noCollide, visual, self)
+						if ok then
+							self.writes += wrote
+						else
 							self.state[char] = nil
 						end
 					end
@@ -553,14 +641,14 @@ function Hitbox:diagnose()
 		return false, "no hay otro jugador con personaje"
 	end
 
-	local parts = collect(char, cfg.hitbox.mode)
+	local parts = collect(char, cfg.hitbox.mode, cfg.hitbox.partName)
 	if #parts == 0 then
 		return false, string.format("0 parts en modo '%s' para %s", cfg.hitbox.mode, target.Name)
 	end
 
 	local probe = table.create(#parts)
 	for i = 1, #parts do
-		probe[i] = { p = parts[i], size = parts[i].Size }
+		probe[i] = { p = parts[i], size = parts[i].Size, name = parts[i].Name }
 	end
 
 	local blocked = 0
@@ -577,6 +665,7 @@ function Hitbox:diagnose()
 	task.wait(0.15)
 
 	local stuck, reverted, gone = 0, 0, 0
+	local revertedNames = {}
 	for i = 1, #probe do
 		local s = probe[i]
 		if not s.p.Parent then
@@ -587,6 +676,9 @@ function Hitbox:diagnose()
 				stuck = stuck + 1
 			else
 				reverted = reverted + 1
+				if #revertedNames < 4 then
+					revertedNames[#revertedNames + 1] = s.name
+				end
 			end
 			pcall(function() s.p.Size = s.size end)
 		end
@@ -596,7 +688,7 @@ function Hitbox:diagnose()
 	if stuck == 0 then
 		verdict = "el cliente escribe Size y el juego lo revierte al frame siguiente"
 	elseif reverted > 0 then
-		verdict = "parte se queda, parte se revierte: el juego reescribe esos parts"
+		verdict = "parte se queda, parte se revierte (" .. table.concat(revertedNames, ", ") .. ")"
 	else
 		verdict = "Size se queda. Si igual no pega, el hitreg del juego corre en el servidor"
 	end
@@ -605,6 +697,25 @@ function Hitbox:diagnose()
 		"%s · %d parts · %d quedan · %d revertidas · %d bloqueadas · %d desaparecidas. %s",
 		target.Name, #probe, stuck, reverted, blocked, gone, verdict
 	)
+end
+
+-- nombres de parts que existen en los personajes: para que el usuario elija
+-- el hitbox real del juego cuando no se llama como los estándar
+function Hitbox:partNames()
+	local seen, list = {}, {}
+	for _, plr in ipairs(Players:GetPlayers()) do
+		local c = plr.Character
+		if c and plr ~= LP then
+			for _, d in ipairs(c:GetDescendants()) do
+				if d:IsA("BasePart") and not seen[d.Name] then
+					seen[d.Name] = true
+					list[#list + 1] = d.Name
+				end
+			end
+		end
+	end
+	table.sort(list)
+	return list
 end
 
 -- =====================================================================
@@ -738,6 +849,34 @@ hbTab:CreateDropdown({
 	end,
 })
 
+local nameInput = hbTab:CreateInput({
+	name = "Part por nombre (modo Nombre)",
+	description = "Escribe la part exacta que usa el juego como hitbox",
+	flag = "hb_part",
+	value = "",
+	placeholder = "HumanoidRootPart",
+	callback = function(text)
+		cfg.hitbox.partName = text
+		if cfg.hitbox.mode == "Nombre" then restartHitbox() end
+	end,
+})
+
+hbTab:CreateButton({
+	name = "Listar parts de los jugadores",
+	callback = function()
+		local names = Hitbox:partNames()
+		if #names == 0 then
+			window:Notify({ title = "Sin jugadores", content = "No hay otros jugadores con personaje cargado." })
+			return
+		end
+		window:Notify({
+			title = "Parts disponibles (" .. #names .. ")",
+			content = table.concat(names, ", "),
+			duration = 12,
+		})
+	end,
+})
+
 hbTab:CreateSlider({
 	name = "Multiplicador",
 	flag = "hb_mult",
@@ -760,19 +899,31 @@ hbTab:CreateToggle({
 })
 
 hbTab:CreateToggle({
+	name = "Mostrar cajas del hitbox",
+	description = "BoxHandleAdornment en cada part expandida: ver para creer",
+	flag = "hb_visual",
+	value = false,
+	callback = function(v)
+		cfg.hitbox.visual = v
+		if not v then Hitbox:clearVisual() end
+	end,
+})
+
+hbTab:CreateColorPicker({
+	name = "Color del hitbox",
+	flag = "hb_color",
+	color = Color3.fromRGB(255, 92, 92),
+	callback = function(c) cfg.hitbox.color = c end,
+})
+
+hbTab:CreateToggle({
 	name = "Incluir compañeros",
 	flag = "hb_team",
 	value = false,
 	callback = function(v) cfg.hitbox.teammates = v end,
 })
 
-hbTab:CreateButton({
-	name = "Restaurar hitboxes ahora",
-	callback = function()
-		Hitbox:reset()
-		if cfg.hitbox.enabled then restartHitbox() end
-	end,
-})
+hbTab:CreateSection({ name = "Diagnóstico" })
 
 hbTab:CreateButton({
 	name = "Probar si el juego revierte el Size",
@@ -786,9 +937,36 @@ hbTab:CreateButton({
 	end,
 })
 
+local statsText = hbTab:CreateText({
+	name = "Estado",
+	text = "builds 0 · escrituras 0/s",
+})
+
+task.spawn(function()
+	local lastWrites = 0
+	while true do
+		task.wait(1)
+		if cfg.hitbox.enabled then
+			local w = Hitbox.writes
+			local rate = w - lastWrites
+			lastWrites = w
+			pcall(function()
+				statsText:Set(string.format(
+					"builds %d · escrituras %d/s%s",
+					Hitbox.builds, rate,
+					-- si sube cada segundo, el juego está revirtiendo
+					rate > 10 and " · el juego revierte el Size" or ""
+				))
+			end)
+		else
+			lastWrites = Hitbox.writes
+		end
+	end
+end)
+
 hbTab:CreateText({
 	name = "Si el Size se queda pero no pega",
-	text = "El hitreg corre en el servidor y valida contra sus propias hitboxes: no hay nada que el cliente pueda agrandar. Prueba 'Todo' o 'HumanoidRootPart' antes de descartarlo. El diagnóstico dice si las escrituras aguantan.",
+	text = "El hitreg corre en el servidor y valida contra sus propias hitboxes: no hay nada que el cliente pueda agrandar. Prueba 'Todo' o 'HumanoidRootPart' antes de descartarlo. El contador de escrituras dice si el juego revierte.",
 })
 
 -- ---------------------------- Config ----------------------------
